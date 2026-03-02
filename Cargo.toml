@@ -1,0 +1,11 @@
+[package]
+name = "grbly"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+three-d = { version = "0.18", features = ["egui-gui"] }
+serialport = "4"
+rfd = "0.15"
+parking_lot = "0.12"
+arboard = "3"
