@@ -183,9 +183,11 @@ impl Engine {
         let mut j = self.job.write();
         if j.current_line >= j.lines.len() { return; }
         let line = j.lines[j.current_line].clone();
+        let z_locked = j.z_locked;
         j.current_line += 1;
         drop(j);
-        let stripped = strip_gcode_comments(&line).trim().to_string();
+        let mut stripped = strip_gcode_comments(&line).trim().to_string();
+        if z_locked { stripped = strip_z_words(&stripped); }
         if !stripped.is_empty() {
             self.send(&stripped);
         }
@@ -198,10 +200,14 @@ impl Engine {
     }
 
     fn stream_job(&self) {
-        let lines: Vec<String> = self.job.read().lines.clone();
+        let j = self.job.read();
+        let lines: Vec<String> = j.lines.clone();
+        let z_locked = j.z_locked;
+        drop(j);
         for (i, line) in lines.iter().enumerate() {
             if self.job.read().status != JobStatus::Running { return; }
-            let stripped = strip_gcode_comments(line).trim().to_string();
+            let mut stripped = strip_gcode_comments(line).trim().to_string();
+            if z_locked { stripped = strip_z_words(&stripped); }
             if stripped.is_empty() {
                 self.job.write().current_line = i + 1;
                 continue;
@@ -321,6 +327,27 @@ fn apply_response(
         }
         _ => {}
     }
+}
+
+fn strip_z_words(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'Z' || bytes[i] == b'z' {
+            i += 1;
+            while i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'.' || (bytes[i] >= b'0' && bytes[i] <= b'9')) {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i] == b' ' {
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out.trim().to_string()
 }
 
 fn strip_gcode_comments(line: &str) -> String {

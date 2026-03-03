@@ -60,6 +60,7 @@ pub struct JobState {
     pub segments: Vec<Segment>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
+    pub z_locked: bool,
 }
 
 pub struct MachineProfile {

@@ -101,17 +101,31 @@ fn main() {
     let mut console_state = ui::console::ConsoleState::default();
     let mut theme_set = false;
     let mut middle_dragging = false;
+    let mut ctrl_left_dragging = false;
 
     window.render_loop(move |mut frame_input| {
-        for event in &frame_input.events {
+        let panning = middle_dragging || ctrl_left_dragging;
+        for event in &mut frame_input.events {
             match event {
+                three_d::Event::MousePress { button, modifiers, handled, .. }
+                    if *button == three_d::MouseButton::Left && (modifiers.ctrl || modifiers.command) =>
+                {
+                    ctrl_left_dragging = true;
+                    *handled = true;
+                }
                 three_d::Event::MousePress { button, .. } if *button == three_d::MouseButton::Middle => {
                     middle_dragging = true;
+                }
+                three_d::Event::MouseRelease { button, handled, .. }
+                    if *button == three_d::MouseButton::Left && ctrl_left_dragging =>
+                {
+                    ctrl_left_dragging = false;
+                    *handled = true;
                 }
                 three_d::Event::MouseRelease { button, .. } if *button == three_d::MouseButton::Middle => {
                     middle_dragging = false;
                 }
-                three_d::Event::MouseMotion { delta, .. } if middle_dragging => {
+                three_d::Event::MouseMotion { delta, handled, .. } if panning => {
                     let pos = camera.position();
                     let tgt = camera.target();
                     let up_vec = camera.up();
@@ -121,6 +135,7 @@ fn main() {
                     let cam_up = right.cross(fwd);
                     let offset = right * (-delta.0 as f32 * speed) + cam_up * (delta.1 as f32 * speed);
                     camera.set_view(pos + offset, tgt + offset, up_vec);
+                    *handled = true;
                 }
                 _ => {}
             }

@@ -24,6 +24,7 @@ pub struct EditorState {
     pub warning: String,
     pub sim_pos: Vec3,
     pub sim_speed: f32,
+    pub z_locked: bool,
     spindle_warn: Option<Instant>,
 }
 
@@ -37,6 +38,7 @@ impl Default for EditorState {
             warning: String::new(),
             sim_pos: Vec3::default(),
             sim_speed: 20.0,
+            z_locked: false,
             spindle_warn: None,
         }
     }
@@ -127,7 +129,7 @@ pub fn draw(
             if state.sim_line < j.lines.len() {
                 state.sim_line += 1;
                 j.current_line = state.sim_line;
-                state.sim_pos = sim_position_at_line(&j.segments, state.sim_line);
+                state.sim_pos = sim_position_at_line(&j.segments, state.sim_line, state.z_locked);
             }
         }
         if ui.add(btn_col("RESET", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() && state.simulating {
@@ -144,6 +146,20 @@ pub fn draw(
                 let mut j = job_lock.write();
                 j.status = JobStatus::Idle;
                 j.current_line = 0;
+            }
+        }
+
+        ui.add_space(12.0);
+        {
+            let zl_text = if state.z_locked { "Z-LOCK ON" } else { "Z-LOCK" };
+            let zl_fill = if state.z_locked {
+                egui::Color32::from_rgb(0x88, 0x00, 0x00)
+            } else {
+                egui::Color32::from_rgb(0x22, 0x11, 0x11)
+            };
+            if ui.add(btn_col(zl_text, RED, zl_fill)).clicked() {
+                state.z_locked = !state.z_locked;
+                job_lock.write().z_locked = state.z_locked;
             }
         }
 
@@ -199,7 +215,7 @@ pub fn draw(
                 } else {
                     state.sim_line += 1;
                     j.current_line = state.sim_line;
-                    state.sim_pos = sim_position_at_line(&j.segments, state.sim_line);
+                    state.sim_pos = sim_position_at_line(&j.segments, state.sim_line, state.z_locked);
                 }
             }
         }
@@ -261,12 +277,13 @@ pub fn draw(
         });
 }
 
-fn sim_position_at_line(segments: &[Segment], line: usize) -> Vec3 {
+fn sim_position_at_line(segments: &[Segment], line: usize, z_locked: bool) -> Vec3 {
     let mut pos = Vec3::default();
     for seg in segments {
         if seg.line > line { break; }
         pos = seg.end;
     }
+    if z_locked { pos.z = 0.0; }
     pos
 }
 
