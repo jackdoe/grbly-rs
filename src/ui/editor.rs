@@ -54,7 +54,7 @@ impl Default for EditorState {
             sim_last_tick: Instant::now(),
             warning: String::new(),
             sim_pos: Vec3::default(),
-            sim_feed: 50.0,
+            sim_feed: 20.0,
             z_locked: false,
             spindle_warn: None,
         }

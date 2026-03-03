@@ -98,12 +98,6 @@ fn main() {
         10000.0,
     );
 
-    let mut control = OrbitControl::new(
-        vec3(75.0, 55.0, 20.0),
-        1.0,
-        10000.0,
-    );
-
     let mut gui = three_d::GUI::new(&context);
     let mut scene = Scene::new(&context, &CUBIKO);
 
@@ -111,8 +105,10 @@ fn main() {
     let mut editor_state = ui::editor::EditorState::default();
     let mut console_state = ui::console::ConsoleState::default();
     let mut theme_set = false;
-    let mut middle_dragging = false;
-    let mut ctrl_left_dragging = false;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum CamDrag { None, Orbit, Zoom, Pan }
+    let mut cam_drag = CamDrag::None;
 
     let mut frame_input_generator = FrameInputGenerator::from_winit_window(&winit_window);
 
@@ -123,37 +119,71 @@ fn main() {
         winit::event::Event::RedrawRequested(_) => {
             let mut frame_input = frame_input_generator.generate(&gl);
 
-            let panning = middle_dragging || ctrl_left_dragging;
+            let active_drag = cam_drag;
             for event in &mut frame_input.events {
                 match event {
                     three_d::Event::MousePress { button, modifiers, handled, .. }
                         if *button == three_d::MouseButton::Left && (modifiers.ctrl || modifiers.command) =>
                     {
-                        ctrl_left_dragging = true;
+                        cam_drag = CamDrag::Pan;
                         *handled = true;
                     }
-                    three_d::Event::MousePress { button, .. } if *button == three_d::MouseButton::Middle => {
-                        middle_dragging = true;
+                    three_d::Event::MousePress { button, modifiers, handled, .. }
+                        if *button == three_d::MouseButton::Right && (modifiers.ctrl || modifiers.command) =>
+                    {
+                        cam_drag = CamDrag::Zoom;
+                        *handled = true;
+                    }
+                    three_d::Event::MousePress { button, handled, .. }
+                        if *button == three_d::MouseButton::Right =>
+                    {
+                        cam_drag = CamDrag::Orbit;
+                        *handled = true;
                     }
                     three_d::Event::MouseRelease { button, handled, .. }
-                        if *button == three_d::MouseButton::Left && ctrl_left_dragging =>
+                        if (*button == three_d::MouseButton::Left && active_drag == CamDrag::Pan)
+                        || (*button == three_d::MouseButton::Right && active_drag != CamDrag::Pan) =>
                     {
-                        ctrl_left_dragging = false;
+                        cam_drag = CamDrag::None;
                         *handled = true;
                     }
-                    three_d::Event::MouseRelease { button, .. } if *button == three_d::MouseButton::Middle => {
-                        middle_dragging = false;
-                    }
-                    three_d::Event::MouseMotion { delta, handled, .. } if panning => {
+                    three_d::Event::MouseMotion { delta, handled, .. } if active_drag == CamDrag::Pan => {
                         let pos = camera.position();
                         let tgt = camera.target();
-                        let up_vec = camera.up();
+                        let up = camera.up();
                         let fwd = (tgt - pos).normalize();
                         let speed = pos.distance(tgt) * 0.002;
-                        let right = fwd.cross(up_vec).normalize();
+                        let right = fwd.cross(up).normalize();
                         let cam_up = right.cross(fwd);
                         let offset = right * (-delta.0 as f32 * speed) + cam_up * (delta.1 as f32 * speed);
-                        camera.set_view(pos + offset, tgt + offset, up_vec);
+                        camera.set_view(pos + offset, tgt + offset, up);
+                        *handled = true;
+                    }
+                    three_d::Event::MouseMotion { delta, handled, .. } if active_drag == CamDrag::Orbit => {
+                        let pos = camera.position();
+                        let tgt = camera.target();
+                        let off = pos - tgt;
+                        let dist = off.magnitude();
+                        let theta = off.y.atan2(off.x) - delta.0 as f32 * 0.005;
+                        let phi = (off.z / dist).acos() - delta.1 as f32 * 0.005;
+                        let phi = phi.clamp(0.05, std::f32::consts::PI - 0.05);
+                        let new_off = vec3(
+                            dist * phi.sin() * theta.cos(),
+                            dist * phi.sin() * theta.sin(),
+                            dist * phi.cos(),
+                        );
+                        camera.set_view(tgt + new_off, tgt, vec3(0.0, 0.0, 1.0));
+                        *handled = true;
+                    }
+                    three_d::Event::MouseMotion { delta, handled, .. } if active_drag == CamDrag::Zoom => {
+                        let pos = camera.position();
+                        let tgt = camera.target();
+                        let up = camera.up();
+                        let dist = pos.distance(tgt);
+                        let factor = 1.0 - delta.1 as f32 * 0.005;
+                        let new_dist = (dist * factor).clamp(1.0, 10000.0);
+                        let fwd = (tgt - pos).normalize();
+                        camera.set_view(tgt - fwd * new_dist, tgt, up);
                         *handled = true;
                     }
                     _ => {}
@@ -190,7 +220,22 @@ fn main() {
                 },
             );
 
-            control.handle_events(&mut camera, &mut frame_input.events);
+            for event in &mut frame_input.events {
+                if let three_d::Event::MouseWheel { delta, handled, .. } = event {
+                    if !*handled {
+                        let pos = camera.position();
+                        let tgt = camera.target();
+                        let up = camera.up();
+                        let dist = pos.distance(tgt);
+                        let factor = 1.0 - delta.1 as f32 * 0.001;
+                        let new_dist = (dist * factor).clamp(1.0, 10000.0);
+                        let fwd = (tgt - pos).normalize();
+                        camera.set_view(tgt - fwd * new_dist, tgt, up);
+                        *handled = true;
+                    }
+                }
+            }
+
             camera.set_viewport(frame_input.viewport);
 
             let tool_pos = if editor_state.simulating {
