@@ -12,9 +12,9 @@ pub struct Scene {
     pub trail: Option<Gm<Mesh, ColorMaterial>>,
     pub bounds_box: Option<Gm<Mesh, ColorMaterial>>,
     trail_points: Vec<V3>,
+    trail_dirty: bool,
     last_pos: V3,
     last_seg_version: usize,
-    last_current_line: usize,
 }
 
 const LINE_W: f32 = 0.3;
@@ -37,9 +37,9 @@ impl Scene {
             trail: None,
             bounds_box: None,
             trail_points: Vec::new(),
+            trail_dirty: false,
             last_pos: V3::default(),
             last_seg_version: 0,
-            last_current_line: usize::MAX,
         }
     }
 
@@ -52,21 +52,21 @@ impl Scene {
                 self.trail_points.drain(..drain);
             }
             self.last_pos = wpos;
+            self.trail_dirty = true;
         }
 
         self.gantry = Some(build_gantry(context, wpos, profile));
 
-        if self.trail_points.len() >= 2 {
+        if self.trail_dirty && self.trail_points.len() >= 2 {
             self.trail = Some(build_trail(context, &self.trail_points));
+            self.trail_dirty = false;
         }
 
         let seg_count = jstate.segments.len();
-        let current = jstate.current_line;
-        if seg_count != self.last_seg_version || current != self.last_current_line {
+        if seg_count != self.last_seg_version {
             self.last_seg_version = seg_count;
-            self.last_current_line = current;
             if !jstate.segments.is_empty() {
-                self.toolpath = Some(build_toolpath(context, &jstate.segments, current, jstate.bounds_min, jstate.bounds_max));
+                self.toolpath = Some(build_toolpath(context, &jstate.segments, jstate.bounds_min, jstate.bounds_max));
                 self.bounds_box = Some(build_wire_box(context, jstate.bounds_min, jstate.bounds_max, Srgba::new(0x55, 0x55, 0x77, 0x66), GRID_W));
             } else {
                 self.toolpath = None;
@@ -191,15 +191,14 @@ fn build_triad(context: &Context) -> Gm<Mesh, ColorMaterial> {
     lb.build(context)
 }
 
-fn build_toolpath(context: &Context, segments: &[Segment], current_line: usize, bmin: V3, bmax: V3) -> Gm<Mesh, ColorMaterial> {
+fn build_toolpath(context: &Context, segments: &[Segment], bmin: V3, bmax: V3) -> Gm<Mesh, ColorMaterial> {
     let mut lb = LineBuilder::new();
     for seg in segments {
-        let mut color = if seg.rapid {
+        let color = if seg.rapid {
             Srgba::new(0xff, 0x88, 0x00, 0xff)
         } else {
             depth_color(seg.end.z, bmin.z, bmax.z)
         };
-        if seg.line >= current_line { color.a = 0x80; }
         let w = if seg.rapid { GRID_W } else { LINE_W };
         lb.add(seg.start, seg.end, color, w);
     }

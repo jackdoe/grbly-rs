@@ -69,15 +69,18 @@ pub struct Segment {
     pub line: usize,
 }
 
+use std::sync::Arc;
+
 #[derive(Clone, Default, Debug)]
 pub struct JobState {
-    pub lines: Vec<String>,
+    pub lines: Arc<Vec<String>>,
     pub current_line: usize,
     pub status: JobStatus,
-    pub segments: Vec<Segment>,
+    pub segments: Arc<Vec<Segment>>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
     pub z_locked: bool,
+    pub total_dist: f32,
 }
 
 pub struct MachineProfile {

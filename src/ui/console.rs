@@ -59,10 +59,11 @@ pub fn draw(
     log: &Arc<Mutex<LogBuffer>>,
     state: &mut ConsoleState,
 ) {
+    let log_lines: Vec<String> = log.lock().lines().to_vec();
+
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("CONSOLE").size(14.0).color(DIM).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let log_lines: Vec<String> = log.lock().lines().to_vec();
             if ui.add(egui::Button::new(egui::RichText::new("COPY").size(12.0)).min_size(egui::vec2(50.0, 24.0))).clicked() {
                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
                     let text = log_lines.join("\n");
@@ -71,11 +72,6 @@ pub fn draw(
             }
         });
     });
-
-    let log_lines: Vec<String> = {
-        let buf = log.lock();
-        buf.lines().to_vec()
-    };
 
     let available = ui.available_height() - 32.0;
     ui.allocate_ui(egui::vec2(ui.available_width(), available.max(40.0)), |ui| {

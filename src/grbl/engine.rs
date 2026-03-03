@@ -201,7 +201,7 @@ impl Engine {
 
     fn stream_job(&self) {
         let j = self.job.read();
-        let lines: Vec<String> = j.lines.clone();
+        let lines = j.lines.clone();
         let z_locked = j.z_locked;
         drop(j);
         for (i, line) in lines.iter().enumerate() {
@@ -228,7 +228,8 @@ fn write_lines(write_port: &WritePort, lines: &[String]) {
     let mut wp = write_port.lock();
     if let Some(ref mut port) = *wp {
         for line in lines {
-            let _ = port.write_all(format!("{}\n", line).as_bytes());
+            let _ = port.write_all(line.as_bytes());
+            let _ = port.write_all(b"\n");
         }
     }
 }

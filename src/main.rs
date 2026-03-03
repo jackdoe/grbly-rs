@@ -3,6 +3,7 @@ mod gcode;
 mod ui;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 use three_d::*;
@@ -254,8 +255,7 @@ fn main() {
             let _ = gui.render();
             gl.swap_buffers().unwrap();
 
-            *control_flow = ControlFlow::Poll;
-            winit_window.request_redraw();
+            *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16));
         }
         winit::event::Event::WindowEvent { ref event, .. } => {
             frame_input_generator.handle_winit_window_event(event);

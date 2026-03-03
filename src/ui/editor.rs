@@ -13,11 +13,13 @@ pub fn load_file(path: &Path, job_lock: &RwLock<JobState>) {
     if let Ok(content) = std::fs::read_to_string(path) {
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let (segs, bmin, bmax) = gcode::parser::parse_with_bounds(&lines);
+        let total_dist: f32 = segs.iter().map(|s| s.start.dist(s.end)).sum();
         let mut j = job_lock.write();
-        j.lines = lines;
-        j.segments = segs;
+        j.lines = Arc::new(lines);
+        j.segments = Arc::new(segs);
         j.bounds_min = bmin;
         j.bounds_max = bmax;
+        j.total_dist = total_dist;
         j.status = JobStatus::Idle;
         j.current_line = 0;
     }
@@ -210,7 +212,7 @@ pub fn draw(
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("FEED").size(11.0).color(DIM));
             ui.add(egui::Slider::new(&mut state.sim_feed, 1.0..=500.0).suffix(" mm/s").logarithmic(true));
-            let total_dist: f32 = jstate.segments.iter().map(|s| s.start.dist(s.end)).sum();
+            let total_dist = jstate.total_dist;
             let secs = (total_dist / state.sim_feed) as u32;
             let h = secs / 3600;
             let m = (secs % 3600) / 60;
