@@ -271,6 +271,17 @@ fn main() {
                 }
                 winit::event::WindowEvent::DroppedFile(path) => {
                     ui::editor::load_file(path, &job);
+                    let size = winit_window.inner_size();
+                    #[allow(deprecated)]
+                    let fake = winit::event::WindowEvent::CursorMoved {
+                        device_id: unsafe { std::mem::zeroed() },
+                        position: winit::dpi::PhysicalPosition::new(
+                            size.width as f64 / 2.0,
+                            size.height as f64 * 0.75,
+                        ),
+                        modifiers: winit::event::ModifiersState::default(),
+                    };
+                    frame_input_generator.handle_winit_window_event(&fake);
                 }
                 _ => {}
             }

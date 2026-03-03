@@ -90,7 +90,7 @@ pub fn draw(
 
     let has_lines = !jstate.lines.is_empty();
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("G-CODE").size(14.0).color(DIM).strong());
         ui.add_space(4.0);
         if ui.add(btn("OPEN")).clicked() {
@@ -155,16 +155,6 @@ pub fn draw(
             let mut j = job_lock.write();
             j.current_line = 0;
         }
-        if state.simulating {
-            if ui.add(btn_col("EXIT", egui::Color32::from_rgb(0x88, 0x88, 0x88), egui::Color32::from_rgb(0x11, 0x11, 0x18))).clicked() {
-                state.simulating = false;
-                state.sim_playing = false;
-                let mut j = job_lock.write();
-                j.status = JobStatus::Idle;
-                j.current_line = 0;
-            }
-        }
-
         ui.add_space(12.0);
         {
             let zl_text = if state.z_locked { "Z-LOCK ON" } else { "Z-LOCK" };
@@ -192,6 +182,7 @@ pub fn draw(
                 state.spindle_warn = Some(Instant::now());
             } else {
                 state.spindle_warn = None;
+                engine.reset_job();
                 engine.start_job();
             }
         }
@@ -219,6 +210,13 @@ pub fn draw(
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("FEED").size(11.0).color(DIM));
             ui.add(egui::Slider::new(&mut state.sim_feed, 1.0..=500.0).suffix(" mm/s").logarithmic(true));
+            let total_dist: f32 = jstate.segments.iter().map(|s| s.start.dist(s.end)).sum();
+            let secs = (total_dist / state.sim_feed) as u32;
+            let h = secs / 3600;
+            let m = (secs % 3600) / 60;
+            let s = secs % 60;
+            let time_str = if h > 0 { format!("{}h {:02}m {:02}s", h, m, s) } else { format!("{}m {:02}s", m, s) };
+            ui.label(egui::RichText::new(time_str).size(11.0).color(DIM));
         });
         if state.sim_playing {
             let dt = state.sim_last_tick.elapsed().as_secs_f32();
