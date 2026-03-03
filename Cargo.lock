@@ -987,6 +987,7 @@ dependencies = [
  "rfd",
  "serialport",
  "three-d",
+ "winit",
 ]
 
 [[package]]

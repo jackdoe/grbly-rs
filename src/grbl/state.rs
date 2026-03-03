@@ -19,6 +19,23 @@ pub struct Vec3 {
     pub z: f32,
 }
 
+impl Vec3 {
+    pub fn dist(self, other: Vec3) -> f32 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        let dz = self.z - other.z;
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+
+    pub fn lerp(self, other: Vec3, t: f32) -> Vec3 {
+        Vec3 {
+            x: self.x + (other.x - self.x) * t,
+            y: self.y + (other.y - self.y) * t,
+            z: self.z + (other.z - self.z) * t,
+        }
+    }
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct MachineState {
     pub port: String,

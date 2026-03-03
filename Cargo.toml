@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 three-d = { version = "0.18", features = ["egui-gui"] }
+winit = "0.28"
 serialport = "4"
 rfd = "0.15"
 parking_lot = "0.12"

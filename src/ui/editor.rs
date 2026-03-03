@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,6 +8,20 @@ use three_d::egui;
 use crate::gcode;
 use crate::grbl::engine::Engine;
 use crate::grbl::state::*;
+
+pub fn load_file(path: &Path, job_lock: &RwLock<JobState>) {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let lines: Vec<String> = content.lines().map(String::from).collect();
+        let (segs, bmin, bmax) = gcode::parser::parse_with_bounds(&lines);
+        let mut j = job_lock.write();
+        j.lines = lines;
+        j.segments = segs;
+        j.bounds_min = bmin;
+        j.bounds_max = bmax;
+        j.status = JobStatus::Idle;
+        j.current_line = 0;
+    }
+}
 
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
 const DIM: egui::Color32 = egui::Color32::from_rgb(0x88, 0x77, 0x44);
@@ -19,11 +34,12 @@ const CODE_TEXT: egui::Color32 = egui::Color32::from_rgb(0xcc, 0xaa, 0x66);
 pub struct EditorState {
     pub simulating: bool,
     pub sim_playing: bool,
-    pub sim_line: usize,
-    pub sim_last_advance: Instant,
+    pub sim_seg: usize,
+    pub sim_frac: f32,
+    pub sim_last_tick: Instant,
     pub warning: String,
     pub sim_pos: Vec3,
-    pub sim_speed: f32,
+    pub sim_feed: f32,
     pub z_locked: bool,
     spindle_warn: Option<Instant>,
 }
@@ -33,11 +49,12 @@ impl Default for EditorState {
         Self {
             simulating: false,
             sim_playing: false,
-            sim_line: 0,
-            sim_last_advance: Instant::now(),
+            sim_seg: 0,
+            sim_frac: 0.0,
+            sim_last_tick: Instant::now(),
             warning: String::new(),
             sim_pos: Vec3::default(),
-            sim_speed: 20.0,
+            sim_feed: 50.0,
             z_locked: false,
             spindle_warn: None,
         }
@@ -83,17 +100,7 @@ pub fn draw(
                     .add_filter("G-code", &["nc", "gcode", "ngc", "tap", "gc"])
                     .pick_file()
                 {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        let lines: Vec<String> = content.lines().map(String::from).collect();
-                        let (segs, bmin, bmax) = gcode::parser::parse_with_bounds(&lines);
-                        let mut j = job_lock.write();
-                        j.lines = lines;
-                        j.segments = segs;
-                        j.bounds_min = bmin;
-                        j.bounds_max = bmax;
-                        j.status = JobStatus::Idle;
-                        j.current_line = 0;
-                    }
+                    load_file(&path, &job_lock);
                 }
             });
         }
@@ -105,7 +112,8 @@ pub fn draw(
             }
         } else if ui.add(btn_col("PLAY", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() && has_lines {
             if !state.simulating {
-                state.sim_line = 0;
+                state.sim_seg = 0;
+                state.sim_frac = 0.0;
                 state.sim_pos = Vec3::default();
                 let mut j = job_lock.write();
                 j.current_line = 0;
@@ -113,27 +121,35 @@ pub fn draw(
             }
             state.simulating = true;
             state.sim_playing = true;
-            state.sim_last_advance = Instant::now();
+            state.sim_last_tick = Instant::now();
         }
         if ui.add(btn_col("STEP", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() && has_lines {
             if !state.simulating {
                 state.simulating = true;
-                state.sim_line = 0;
+                state.sim_seg = 0;
+                state.sim_frac = 0.0;
                 state.sim_pos = Vec3::default();
                 let mut j = job_lock.write();
                 j.current_line = 0;
                 j.status = JobStatus::Running;
             }
             state.sim_playing = false;
-            let mut j = job_lock.write();
-            if state.sim_line < j.lines.len() {
-                state.sim_line += 1;
-                j.current_line = state.sim_line;
-                state.sim_pos = sim_position_at_line(&j.segments, state.sim_line, state.z_locked);
+            let j = job_lock.read();
+            if state.sim_seg < j.segments.len() {
+                let start_line = j.segments[state.sim_seg].line;
+                while state.sim_seg < j.segments.len() && j.segments[state.sim_seg].line == start_line {
+                    state.sim_pos = j.segments[state.sim_seg].end;
+                    state.sim_seg += 1;
+                }
+                state.sim_frac = 0.0;
+                if state.z_locked { state.sim_pos.z = 0.0; }
             }
+            drop(j);
+            job_lock.write().current_line = seg_to_line(&jstate.segments, state.sim_seg);
         }
         if ui.add(btn_col("RESET", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() && state.simulating {
-            state.sim_line = 0;
+            state.sim_seg = 0;
+            state.sim_frac = 0.0;
             state.sim_playing = false;
             state.sim_pos = Vec3::default();
             let mut j = job_lock.write();
@@ -201,23 +217,40 @@ pub fn draw(
 
     if state.simulating {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("SPEED").size(11.0).color(DIM));
-            ui.add(egui::Slider::new(&mut state.sim_speed, 1.0..=200.0).suffix(" ln/s").logarithmic(true));
+            ui.label(egui::RichText::new("FEED").size(11.0).color(DIM));
+            ui.add(egui::Slider::new(&mut state.sim_feed, 1.0..=500.0).suffix(" mm/s").logarithmic(true));
         });
         if state.sim_playing {
-            let interval_ms = (1000.0 / state.sim_speed) as u128;
-            if state.sim_last_advance.elapsed().as_millis() >= interval_ms {
-                state.sim_last_advance = Instant::now();
-                let mut j = job_lock.write();
-                if state.sim_line >= j.lines.len() {
-                    j.status = JobStatus::Complete;
-                    state.sim_playing = false;
+            let dt = state.sim_last_tick.elapsed().as_secs_f32();
+            state.sim_last_tick = Instant::now();
+            let segments = &jstate.segments;
+            let mut remaining = state.sim_feed * dt;
+
+            while remaining > 0.0 && state.sim_seg < segments.len() {
+                let seg = &segments[state.sim_seg];
+                let seg_len = seg.start.dist(seg.end);
+                let left_in_seg = (1.0 - state.sim_frac) * seg_len;
+
+                if seg_len < 0.001 || remaining >= left_in_seg {
+                    remaining -= left_in_seg;
+                    state.sim_seg += 1;
+                    state.sim_frac = 0.0;
                 } else {
-                    state.sim_line += 1;
-                    j.current_line = state.sim_line;
-                    state.sim_pos = sim_position_at_line(&j.segments, state.sim_line, state.z_locked);
+                    state.sim_frac += remaining / seg_len;
+                    remaining = 0.0;
                 }
             }
+
+            if state.sim_seg >= segments.len() {
+                state.sim_playing = false;
+                state.sim_pos = segments.last().map(|s| s.end).unwrap_or_default();
+                job_lock.write().status = JobStatus::Complete;
+            } else {
+                let seg = &segments[state.sim_seg];
+                state.sim_pos = seg.start.lerp(seg.end, state.sim_frac);
+            }
+            if state.z_locked { state.sim_pos.z = 0.0; }
+            job_lock.write().current_line = seg_to_line(segments, state.sim_seg);
         }
     }
 
@@ -277,14 +310,12 @@ pub fn draw(
         });
 }
 
-fn sim_position_at_line(segments: &[Segment], line: usize, z_locked: bool) -> Vec3 {
-    let mut pos = Vec3::default();
-    for seg in segments {
-        if seg.line > line { break; }
-        pos = seg.end;
+fn seg_to_line(segments: &[Segment], seg_idx: usize) -> usize {
+    if seg_idx < segments.len() {
+        segments[seg_idx].line
+    } else {
+        segments.last().map(|s| s.line + 1).unwrap_or(0)
     }
-    if z_locked { pos.z = 0.0; }
-    pos
 }
 
 fn check_bounds(jstate: &JobState, profile: &MachineProfile) -> String {

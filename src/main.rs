@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 use three_d::*;
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::window::WindowBuilder;
 
 use grbl::engine::Engine;
 use grbl::state::*;
@@ -68,17 +70,26 @@ fn main() {
         });
     }
 
-    let window = Window::new(WindowSettings {
-        title: "Grbly".to_string(),
-        max_size: Some((1920, 1080)),
-        ..Default::default()
-    })
-    .unwrap();
+    let event_loop = EventLoop::new();
+    let winit_window = WindowBuilder::new()
+        .with_title("Grbly")
+        .with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0))
+        .with_max_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0))
+        .with_min_inner_size(winit::dpi::LogicalSize::new(2.0, 2.0))
+        .build(&event_loop)
+        .unwrap();
+    winit_window.focus_window();
 
-    let context = window.gl();
+    let gl = WindowedContext::from_winit_window(&winit_window, SurfaceSettings::default()).unwrap();
+    let context: Context = (*gl).clone();
+
+    let viewport = {
+        let (w, h): (u32, u32) = winit_window.inner_size().into();
+        Viewport::new_at_origo(w, h)
+    };
 
     let mut camera = Camera::new_perspective(
-        window.viewport(),
+        viewport,
         vec3(200.0, -150.0, 150.0),
         vec3(75.0, 55.0, 20.0),
         vec3(0.0, 0.0, 1.0),
@@ -103,93 +114,123 @@ fn main() {
     let mut middle_dragging = false;
     let mut ctrl_left_dragging = false;
 
-    window.render_loop(move |mut frame_input| {
-        let panning = middle_dragging || ctrl_left_dragging;
-        for event in &mut frame_input.events {
+    let mut frame_input_generator = FrameInputGenerator::from_winit_window(&winit_window);
+
+    event_loop.run(move |event, _, control_flow| match event {
+        winit::event::Event::MainEventsCleared => {
+            winit_window.request_redraw();
+        }
+        winit::event::Event::RedrawRequested(_) => {
+            let mut frame_input = frame_input_generator.generate(&gl);
+
+            let panning = middle_dragging || ctrl_left_dragging;
+            for event in &mut frame_input.events {
+                match event {
+                    three_d::Event::MousePress { button, modifiers, handled, .. }
+                        if *button == three_d::MouseButton::Left && (modifiers.ctrl || modifiers.command) =>
+                    {
+                        ctrl_left_dragging = true;
+                        *handled = true;
+                    }
+                    three_d::Event::MousePress { button, .. } if *button == three_d::MouseButton::Middle => {
+                        middle_dragging = true;
+                    }
+                    three_d::Event::MouseRelease { button, handled, .. }
+                        if *button == three_d::MouseButton::Left && ctrl_left_dragging =>
+                    {
+                        ctrl_left_dragging = false;
+                        *handled = true;
+                    }
+                    three_d::Event::MouseRelease { button, .. } if *button == three_d::MouseButton::Middle => {
+                        middle_dragging = false;
+                    }
+                    three_d::Event::MouseMotion { delta, handled, .. } if panning => {
+                        let pos = camera.position();
+                        let tgt = camera.target();
+                        let up_vec = camera.up();
+                        let fwd = (tgt - pos).normalize();
+                        let speed = pos.distance(tgt) * 0.002;
+                        let right = fwd.cross(up_vec).normalize();
+                        let cam_up = right.cross(fwd);
+                        let offset = right * (-delta.0 as f32 * speed) + cam_up * (delta.1 as f32 * speed);
+                        camera.set_view(pos + offset, tgt + offset, up_vec);
+                        *handled = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            let mstate = state.read().clone();
+            let jstate = job.read().clone();
+
+            gui.update(
+                &mut frame_input.events,
+                frame_input.accumulated_time,
+                frame_input.viewport,
+                frame_input.device_pixel_ratio,
+                |ctx| {
+                    if !theme_set {
+                        setup_theme(ctx);
+                        theme_set = true;
+                    }
+
+                    ui::controls::draw(ctx, &engine, &mstate, &jstate, &mut controls_state);
+
+                    egui::TopBottomPanel::bottom("bottom_panels")
+                        .resizable(true)
+                        .default_height(250.0)
+                        .show(ctx, |ui| {
+                            ui.columns(2, |cols| {
+                                ui::editor::draw(&mut cols[0], &engine, &mstate, &jstate, &job, &mut editor_state, &CUBIKO);
+                                ui::console::draw(&mut cols[1], &engine, &log, &mut console_state);
+                            });
+                        });
+
+                    handle_keyboard(ctx, &engine, &jstate, controls_state.jog_step);
+                },
+            );
+
+            control.handle_events(&mut camera, &mut frame_input.events);
+            camera.set_viewport(frame_input.viewport);
+
+            let tool_pos = if editor_state.simulating {
+                editor_state.sim_pos
+            } else {
+                mstate.wpos
+            };
+            scene.update(&context, tool_pos, &jstate, &CUBIKO);
+
+            let objects = scene.collect();
+            frame_input
+                .screen()
+                .clear(ClearState::color_and_depth(0.03, 0.03, 0.06, 1.0, 1.0))
+                .render(&camera, objects, &[]);
+
+            let _ = gui.render();
+            gl.swap_buffers().unwrap();
+
+            *control_flow = ControlFlow::Poll;
+            winit_window.request_redraw();
+        }
+        winit::event::Event::WindowEvent { ref event, .. } => {
+            frame_input_generator.handle_winit_window_event(event);
             match event {
-                three_d::Event::MousePress { button, modifiers, handled, .. }
-                    if *button == three_d::MouseButton::Left && (modifiers.ctrl || modifiers.command) =>
-                {
-                    ctrl_left_dragging = true;
-                    *handled = true;
+                winit::event::WindowEvent::Resized(physical_size) => {
+                    gl.resize(*physical_size);
                 }
-                three_d::Event::MousePress { button, .. } if *button == three_d::MouseButton::Middle => {
-                    middle_dragging = true;
+                winit::event::WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                    gl.resize(**new_inner_size);
                 }
-                three_d::Event::MouseRelease { button, handled, .. }
-                    if *button == three_d::MouseButton::Left && ctrl_left_dragging =>
-                {
-                    ctrl_left_dragging = false;
-                    *handled = true;
+                winit::event::WindowEvent::CloseRequested => {
+                    *control_flow = ControlFlow::Exit;
                 }
-                three_d::Event::MouseRelease { button, .. } if *button == three_d::MouseButton::Middle => {
-                    middle_dragging = false;
-                }
-                three_d::Event::MouseMotion { delta, handled, .. } if panning => {
-                    let pos = camera.position();
-                    let tgt = camera.target();
-                    let up_vec = camera.up();
-                    let fwd = (tgt - pos).normalize();
-                    let speed = pos.distance(tgt) * 0.002;
-                    let right = fwd.cross(up_vec).normalize();
-                    let cam_up = right.cross(fwd);
-                    let offset = right * (-delta.0 as f32 * speed) + cam_up * (delta.1 as f32 * speed);
-                    camera.set_view(pos + offset, tgt + offset, up_vec);
-                    *handled = true;
+                winit::event::WindowEvent::DroppedFile(path) => {
+                    ui::editor::load_file(path, &job);
                 }
                 _ => {}
             }
         }
-
-        let mstate = state.read().clone();
-        let jstate = job.read().clone();
-
-        gui.update(
-            &mut frame_input.events,
-            frame_input.accumulated_time,
-            frame_input.viewport,
-            frame_input.device_pixel_ratio,
-            |ctx| {
-                if !theme_set {
-                    setup_theme(ctx);
-                    theme_set = true;
-                }
-
-                ui::controls::draw(ctx, &engine, &mstate, &jstate, &mut controls_state);
-
-                egui::TopBottomPanel::bottom("bottom_panels")
-                    .resizable(true)
-                    .default_height(250.0)
-                    .show(ctx, |ui| {
-                        ui.columns(2, |cols| {
-                            ui::editor::draw(&mut cols[0], &engine, &mstate, &jstate, &job, &mut editor_state, &CUBIKO);
-                            ui::console::draw(&mut cols[1], &engine, &log, &mut console_state);
-                        });
-                    });
-
-                handle_keyboard(ctx, &engine, &jstate, controls_state.jog_step);
-            },
-        );
-
-        control.handle_events(&mut camera, &mut frame_input.events);
-        camera.set_viewport(frame_input.viewport);
-
-        let tool_pos = if editor_state.simulating {
-            editor_state.sim_pos
-        } else {
-            mstate.wpos
-        };
-        scene.update(&context, tool_pos, &jstate, &CUBIKO);
-
-        let objects = scene.collect();
-        frame_input
-            .screen()
-            .clear(ClearState::color_and_depth(0.03, 0.03, 0.06, 1.0, 1.0))
-            .render(&camera, objects, &[]);
-
-        let _ = gui.render();
-
-        FrameOutput::default()
+        _ => {}
     });
 }
 
