@@ -153,27 +153,21 @@ fn jog_section(ui: &mut egui::Ui, engine: &Arc<Engine>, state: &mut ControlsStat
     let step = state.jog_step;
     let jog_h = 32.0;
 
-    ui.horizontal(|ui| {
-        let w = (ui.available_width() - 12.0) / 3.0;
-        ui.add_space(w + 4.0);
-        if ui.add_sized([w, jog_h], wide_btn("Y+")).clicked() {
+    ui.columns(3, |cols| {
+        if cols[1].add_sized([cols[1].available_width(), jog_h], wide_btn("Y+")).clicked() {
             engine.send(&format!("$J=G91 G21 Y{:.3} F1000", step));
         }
     });
-    ui.horizontal(|ui| {
-        let w = (ui.available_width() - 12.0) / 3.0;
-        if ui.add_sized([w, jog_h], wide_btn("X-")).clicked() {
+    ui.columns(3, |cols| {
+        if cols[0].add_sized([cols[0].available_width(), jog_h], wide_btn("X-")).clicked() {
             engine.send(&format!("$J=G91 G21 X-{:.3} F1000", step));
         }
-        ui.add_space(w + 4.0);
-        if ui.add_sized([w, jog_h], wide_btn("X+")).clicked() {
+        if cols[2].add_sized([cols[2].available_width(), jog_h], wide_btn("X+")).clicked() {
             engine.send(&format!("$J=G91 G21 X{:.3} F1000", step));
         }
     });
-    ui.horizontal(|ui| {
-        let w = (ui.available_width() - 12.0) / 3.0;
-        ui.add_space(w + 4.0);
-        if ui.add_sized([w, jog_h], wide_btn("Y-")).clicked() {
+    ui.columns(3, |cols| {
+        if cols[1].add_sized([cols[1].available_width(), jog_h], wide_btn("Y-")).clicked() {
             engine.send(&format!("$J=G91 G21 Y-{:.3} F1000", step));
         }
     });
