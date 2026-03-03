@@ -226,11 +226,12 @@ fn build_gantry(context: &Context, wpos: V3, profile: &MachineProfile) -> Gm<Mes
     lb.add(V3 { x: wpos.x, y: wpos.y - tw, z: wpos.z + tl }, wpos, tip, GRID_W);
     lb.add(V3 { x: wpos.x, y: wpos.y + tw, z: wpos.z + tl }, wpos, tip, GRID_W);
 
-    lb.add(wpos, V3 { x: wpos.x, y: wpos.y, z: 0.0 }, drop_c, GRID_W);
-
-    let sd = 3.0f32;
-    lb.add(V3 { x: wpos.x - sd, y: wpos.y, z: 0.0 }, V3 { x: wpos.x + sd, y: wpos.y, z: 0.0 }, cross, LINE_W);
-    lb.add(V3 { x: wpos.x, y: wpos.y - sd, z: 0.0 }, V3 { x: wpos.x, y: wpos.y + sd, z: 0.0 }, cross, LINE_W);
+    if wpos.z.abs() > 1.0 {
+        lb.add(wpos, V3 { x: wpos.x, y: wpos.y, z: 0.0 }, drop_c, GRID_W);
+        let sd = 3.0f32;
+        lb.add(V3 { x: wpos.x - sd, y: wpos.y, z: 0.0 }, V3 { x: wpos.x + sd, y: wpos.y, z: 0.0 }, cross, LINE_W);
+        lb.add(V3 { x: wpos.x, y: wpos.y - sd, z: 0.0 }, V3 { x: wpos.x, y: wpos.y + sd, z: 0.0 }, cross, LINE_W);
+    }
     let cd = 4.0f32;
     lb.add(V3 { x: wpos.x - cd, y: wpos.y, z: wpos.z }, V3 { x: wpos.x + cd, y: wpos.y, z: wpos.z }, cross, LINE_W);
     lb.add(V3 { x: wpos.x, y: wpos.y - cd, z: wpos.z }, V3 { x: wpos.x, y: wpos.y + cd, z: wpos.z }, cross, LINE_W);
