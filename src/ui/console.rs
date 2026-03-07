@@ -64,11 +64,9 @@ pub fn draw(
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("CONSOLE").size(14.0).color(DIM).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(egui::RichText::new("COPY").size(12.0)).min_size(egui::vec2(50.0, 24.0))).clicked() {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    let text = log_lines.join("\n");
-                    let _ = clipboard.set_text(text);
-                }
+            if ui.add(egui::Button::new(egui::RichText::new("OPEN LOG").size(12.0)).min_size(egui::vec2(70.0, 24.0))).clicked() {
+                let path = "/tmp/grbl.txt";
+                let _ = std::process::Command::new("xdg-open").arg(path).spawn();
             }
         });
     });
@@ -98,7 +96,6 @@ pub fn draw(
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             let text = state.input.trim().to_string();
             if !text.is_empty() {
-                log.lock().add(format!("> {}", text));
                 engine.send(&text);
                 state.input.clear();
             }

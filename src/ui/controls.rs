@@ -53,7 +53,7 @@ pub fn draw(
                 ui.set_min_width(ui.available_width());
                 connection_section(ui, engine, mstate, ui_state);
                 ui.separator();
-                status_section(ui, mstate);
+                status_section(ui, engine, mstate);
                 ui.separator();
                 jog_section(ui, engine, ui_state);
                 ui.separator();
@@ -91,7 +91,7 @@ fn connection_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineS
             }
         } else if cols[1].add_sized([cols[1].available_width(), 28.0], wide_btn_colored("CONNECT", egui::Color32::from_rgb(0x00, 0x66, 0x33))).clicked() {
             if let Some(port) = state.port_list.get(state.port_index) {
-                let _ = engine.connect(port, 115200, &CUBIKO);
+                let _ = engine.connect(port, 115200);
             }
         }
     });
@@ -107,7 +107,7 @@ fn connection_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineS
     });
 }
 
-fn status_section(ui: &mut egui::Ui, mstate: &MachineState) {
+fn status_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState) {
     section(ui, "Status");
     let (color, text) = status_display(mstate.status);
     ui.label(egui::RichText::new(format!("[ {} ]", text)).size(20.0).color(color).strong());
@@ -124,12 +124,33 @@ fn status_section(ui: &mut egui::Ui, mstate: &MachineState) {
     let env = CUBIKO.envelope;
     ui.label(egui::RichText::new(format!("ENVELOPE  X:{:.0}  Y:{:.0}  Z:{:.0}", env.x, env.y, env.z)).size(11.0).color(DIM));
     if mstate.connected {
-        let (sl_color, sl_text) = if mstate.soft_limits {
-            (GREEN, "FW SOFT LIMITS: ON")
-        } else {
-            (RED, "FW SOFT LIMITS: OFF")
-        };
-        ui.label(egui::RichText::new(sl_text).size(12.0).color(sl_color));
+        ui.horizontal(|ui| {
+            let (sl_color, sl_text) = if mstate.soft_limits {
+                (GREEN, "SOFT LIMITS: ON")
+            } else {
+                (RED, "SOFT LIMITS: OFF")
+            };
+            ui.label(egui::RichText::new(sl_text).size(12.0).color(sl_color));
+            let toggle_text = if mstate.soft_limits { "DISABLE" } else { "ENABLE" };
+            let toggle_fill = if mstate.soft_limits {
+                egui::Color32::from_rgb(0x33, 0x11, 0x11)
+            } else {
+                egui::Color32::from_rgb(0x11, 0x33, 0x11)
+            };
+            let btn = egui::Button::new(egui::RichText::new(toggle_text).size(11.0))
+                .fill(toggle_fill)
+                .min_size(egui::vec2(0.0, 20.0));
+            if ui.add(btn).clicked() {
+                // Unlock first in case GRBL is in alarm/locked state
+                engine.send("$X");
+                if mstate.soft_limits {
+                    engine.send("$20=0");
+                } else {
+                    engine.send("$20=1");
+                }
+                engine.send("$$");
+            }
+        });
         let mt = mstate.max_travel;
         ui.label(egui::RichText::new(format!("FW TRAVEL  X:{:.0}  Y:{:.0}  Z:{:.0}", mt.x, mt.y, mt.z)).size(11.0).color(DIM));
     }
@@ -247,19 +268,37 @@ fn actions_section(ui: &mut egui::Ui, engine: &Arc<Engine>) {
 
 fn job_section(ui: &mut egui::Ui, engine: &Arc<Engine>, jstate: &JobState) {
     section(ui, "Job");
-    let pause_label = if jstate.status == JobStatus::Paused { "RESUME" } else { "PAUSE" };
-    ui.columns(2, |cols| {
-        let pause = egui::Button::new(egui::RichText::new(pause_label).size(14.0).color(AMBER).strong())
-            .fill(egui::Color32::from_rgb(0x33, 0x2a, 0x00)).min_size(egui::vec2(0.0, 32.0));
-        if cols[0].add_sized([cols[0].available_width(), 32.0], pause).clicked() {
-            if jstate.status == JobStatus::Paused { engine.resume_job(); } else { engine.pause_job(); }
-        }
-        let stop = egui::Button::new(egui::RichText::new("E-STOP").size(14.0).color(RED).strong())
+    let is_running = jstate.status == JobStatus::Running;
+    let is_paused = jstate.status == JobStatus::Paused;
+
+    if is_running || is_paused {
+        ui.columns(3, |cols| {
+            let pause_label = if is_paused { "RESUME" } else { "PAUSE" };
+            let pause = egui::Button::new(egui::RichText::new(pause_label).size(14.0).color(AMBER).strong())
+                .fill(egui::Color32::from_rgb(0x33, 0x2a, 0x00)).min_size(egui::vec2(0.0, 32.0));
+            if cols[0].add_sized([cols[0].available_width(), 32.0], pause).clicked() {
+                if is_paused { engine.resume_job(); } else { engine.pause_job(); }
+            }
+            let stop = egui::Button::new(egui::RichText::new("STOP").size(14.0).color(AMBER).strong())
+                .fill(egui::Color32::from_rgb(0x33, 0x22, 0x00)).min_size(egui::vec2(0.0, 32.0));
+            if cols[1].add_sized([cols[1].available_width(), 32.0], stop).clicked() {
+                engine.stop_job();
+            }
+            let estop = egui::Button::new(egui::RichText::new("E-STOP").size(14.0).color(RED).strong())
+                .fill(egui::Color32::from_rgb(0x33, 0x11, 0x11)).min_size(egui::vec2(0.0, 32.0));
+            if cols[2].add_sized([cols[2].available_width(), 32.0], estop).clicked() {
+                engine.stop_job();
+                engine.soft_reset();
+            }
+        });
+    } else {
+        let estop = egui::Button::new(egui::RichText::new("E-STOP").size(14.0).color(RED).strong())
             .fill(egui::Color32::from_rgb(0x33, 0x11, 0x11)).min_size(egui::vec2(0.0, 32.0));
-        if cols[1].add_sized([cols[1].available_width(), 32.0], stop).clicked() {
+        if ui.add_sized([ui.available_width(), 32.0], estop).clicked() {
             engine.stop_job();
+            engine.soft_reset();
         }
-    });
+    }
 }
 
 fn status_display(s: Status) -> (egui::Color32, &'static str) {
@@ -271,6 +310,8 @@ fn status_display(s: Status) -> (egui::Color32, &'static str) {
         Status::Home => (AMBER, "HOME"),
         Status::Check => (egui::Color32::from_rgb(0x44, 0x88, 0xff), "CHECK"),
         Status::Jog => (egui::Color32::from_rgb(0x44, 0x88, 0xff), "JOG"),
+        Status::Door => (RED, "DOOR"),
+        Status::Sleep => (DIM, "SLEEP"),
         Status::Disconnected => (DIM, "---"),
     }
 }

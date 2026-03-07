@@ -9,6 +9,8 @@ pub enum Status {
     Home,
     Check,
     Jog,
+    Door,
+    Sleep,
 }
 
 
@@ -93,7 +95,7 @@ pub struct MachineProfile {
 }
 
 pub const CUBIKO: MachineProfile = MachineProfile {
-    envelope: Vec3 { x: 150.0, y: 110.0, z: 40.0 },
+    envelope: Vec3 { x: 145.0, y: 110.0, z: 40.0 },
 };
 
 impl MachineProfile {

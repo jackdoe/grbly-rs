@@ -288,7 +288,7 @@ pub fn draw(
     } else {
         jstate.current_line
     };
-    let running = state.simulating || jstate.status == JobStatus::Running;
+    let running = state.simulating || jstate.status == JobStatus::Running || jstate.current_line > 0;
 
     if jstate.lines.is_empty() {
         ui.centered_and_justified(|ui| {

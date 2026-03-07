@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::collections::VecDeque;
+use std::fs::OpenOptions;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 use super::parser::{parse_response, Response, ResponseType};
 use super::serial::Serial;
@@ -30,7 +31,7 @@ impl SendQueue {
         let mut out = Vec::new();
         while let Some(front) = self.pending.front() {
             let size = front.len() + 1;
-            if self.used + size > self.capacity { break; }
+            if self.used + size > self.capacity && !self.in_flight.is_empty() { break; }
             let line = self.pending.pop_front().unwrap();
             self.in_flight.push_back(size);
             self.used += size;
@@ -45,9 +46,13 @@ impl SendQueue {
         }
     }
 
-    #[cfg(test)]
-    fn in_flight_bytes(&self) -> usize {
-        self.used
+    fn has_space_for(&self, len: usize) -> bool {
+        let size = len + 1;
+        self.used + size <= self.capacity || self.in_flight.is_empty()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.pending.is_empty() && self.in_flight.is_empty()
     }
 
     fn clear(&mut self) {
@@ -55,16 +60,145 @@ impl SendQueue {
         self.in_flight.clear();
         self.used = 0;
     }
+
+    #[cfg(test)]
+    fn in_flight_bytes(&self) -> usize {
+        self.used
+    }
 }
 
-type WritePort = Arc<Mutex<Option<Box<dyn serialport::SerialPort + Send>>>>;
+type OnLog = Arc<Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>>;
+
+/// Shared state for the send pipeline. All serial writes go through here.
+struct SendPipe {
+    queue: Mutex<SendQueue>,
+    buf_ready: Condvar,
+    write_port: Mutex<Option<Box<dyn serialport::SerialPort + Send>>>,
+    on_log: OnLog,
+    file_log: Mutex<std::fs::File>,
+}
+
+impl SendPipe {
+    fn new() -> Self {
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("/tmp/grbl.txt")
+            .expect("failed to open /tmp/grbl.txt");
+        Self {
+            queue: Mutex::new(SendQueue::new(128)),
+            buf_ready: Condvar::new(),
+            write_port: Mutex::new(None),
+            on_log: Arc::new(Mutex::new(None)),
+            file_log: Mutex::new(file),
+        }
+    }
+
+    /// Enqueue a line and flush what fits to serial. Non-blocking.
+    fn send(&self, line: &str) {
+        let line = strip_gcode_comments(line);
+        if line.is_empty() { return; }
+        let to_send = {
+            let mut q = self.queue.lock();
+            q.enqueue(line);
+            q.flush()
+        };
+        self.write_to_serial(&to_send);
+    }
+
+    /// Called when GRBL acks a command (ok/error). Frees buffer space and flushes.
+    fn ack(&self) {
+        let to_send = {
+            let mut q = self.queue.lock();
+            q.ack();
+            let flushed = q.flush();
+            self.buf_ready.notify_all();
+            flushed
+        };
+        self.write_to_serial(&to_send);
+    }
+
+    /// Block until the queue has space for `line`, enqueue it, flush. Used by job streamer.
+    fn send_blocking(&self, line: &str, cancel: &dyn Fn() -> bool) -> bool {
+        let line = strip_gcode_comments(line);
+        if line.is_empty() { return true; }
+        let to_send = {
+            let mut q = self.queue.lock();
+            while !q.has_space_for(line.len()) {
+                if cancel() { return false; }
+                self.buf_ready.wait(&mut q);
+            }
+            q.enqueue(line);
+            q.flush()
+        };
+        self.write_to_serial(&to_send);
+        true
+    }
+
+    /// Block until all in-flight commands are ack'd.
+    fn wait_idle(&self, cancel: &dyn Fn() -> bool) {
+        let mut q = self.queue.lock();
+        while !q.is_idle() {
+            if cancel() { return; }
+            self.buf_ready.wait(&mut q);
+        }
+    }
+
+    /// Send a realtime character (not queued, bypasses buffer).
+    fn realtime(&self, b: u8) {
+        let mut wp = self.write_port.lock();
+        if let Some(ref mut port) = *wp {
+            let _ = port.write_all(&[b]);
+        }
+    }
+
+    fn clear(&self) {
+        let mut q = self.queue.lock();
+        q.clear();
+        self.buf_ready.notify_all();
+    }
+
+    fn log(&self, msg: String) {
+        {
+            let mut f = self.file_log.lock();
+            let _ = writeln!(f, "{}", msg);
+        }
+        if let Some(ref cb) = *self.on_log.lock() {
+            cb(msg);
+        }
+    }
+
+    /// The single place that writes to serial and logs sent commands.
+    fn write_to_serial(&self, lines: &[String]) {
+        if lines.is_empty() { return; }
+        {
+            let mut wp = self.write_port.lock();
+            if let Some(ref mut port) = *wp {
+                for line in lines {
+                    let _ = port.write_all(line.as_bytes());
+                    let _ = port.write_all(b"\n");
+                }
+            }
+        }
+        {
+            let mut f = self.file_log.lock();
+            for line in lines {
+                let _ = writeln!(f, "> {}", line);
+            }
+        }
+        if let Some(ref cb) = *self.on_log.lock() {
+            for line in lines {
+                cb(format!("> {}", line));
+            }
+        }
+    }
+}
 
 pub struct Engine {
     pub state: Arc<RwLock<MachineState>>,
     pub job: Arc<RwLock<JobState>>,
-    write_port: WritePort,
-    queue: Arc<Mutex<SendQueue>>,
-    on_log: Arc<Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>>,
+    pipe: Arc<SendPipe>,
     stop_flag: Mutex<Option<Arc<AtomicBool>>>,
 }
 
@@ -73,29 +207,21 @@ impl Engine {
         Self {
             state,
             job,
-            write_port: Arc::new(Mutex::new(None)),
-            queue: Arc::new(Mutex::new(SendQueue::new(128))),
-            on_log: Arc::new(Mutex::new(None)),
+            pipe: Arc::new(SendPipe::new()),
             stop_flag: Mutex::new(None),
         }
     }
 
     pub fn set_on_log(&self, f: impl Fn(String) + Send + Sync + 'static) {
-        *self.on_log.lock() = Some(Arc::new(f));
+        *self.pipe.on_log.lock() = Some(Arc::new(f));
     }
 
-    fn log(&self, msg: String) {
-        if let Some(ref cb) = *self.on_log.lock() {
-            cb(msg);
-        }
-    }
-
-    pub fn connect(&self, port: &str, baud: u32, profile: &MachineProfile) -> std::io::Result<()> {
+    pub fn connect(&self, port: &str, baud: u32) -> std::io::Result<()> {
         let serial = Serial::open(port, baud)?;
         let (write_port, reader) = serial.into_parts();
 
-        *self.write_port.lock() = Some(write_port);
-        *self.queue.lock() = SendQueue::new(128);
+        *self.pipe.write_port.lock() = Some(write_port);
+        self.pipe.clear();
 
         {
             let mut s = self.state.write();
@@ -109,24 +235,19 @@ impl Engine {
 
         {
             let state = self.state.clone();
-            let queue = self.queue.clone();
-            let write_port = self.write_port.clone();
-            let on_log = self.on_log.clone();
+            let job = self.job.clone();
+            let pipe = self.pipe.clone();
             let stop = stop.clone();
-            std::thread::spawn(move || read_loop(reader, stop, state, queue, write_port, on_log));
+            std::thread::spawn(move || read_loop(reader, stop, state, job, pipe));
         }
 
         {
-            let write_port = self.write_port.clone();
+            let pipe = self.pipe.clone();
             let stop = stop.clone();
-            std::thread::spawn(move || poll_loop(stop, write_port));
+            std::thread::spawn(move || poll_loop(stop, pipe));
         }
 
-        let env = profile.envelope;
-        self.send("$20=1");
-        self.send(&format!("$130={:.0}", env.x));
-        self.send(&format!("$131={:.0}", env.y));
-        self.send(&format!("$132={:.0}", env.z));
+        // Just read current settings, don't overwrite them
         self.send("$$");
 
         Ok(())
@@ -136,36 +257,26 @@ impl Engine {
         if let Some(stop) = self.stop_flag.lock().take() {
             stop.store(true, Ordering::Relaxed);
         }
-        *self.write_port.lock() = None;
-        self.queue.lock().clear();
+        *self.pipe.write_port.lock() = None;
+        self.pipe.clear();
         let mut s = self.state.write();
         s.connected = false;
         s.status = Status::Disconnected;
     }
 
     pub fn send(&self, line: &str) {
-        let stripped = strip_gcode_comments(line);
-        let to_send = {
-            let mut q = self.queue.lock();
-            q.enqueue(stripped);
-            q.flush()
-        };
-        write_lines(&self.write_port, &to_send);
+        self.pipe.send(line);
     }
 
-    pub fn realtime(&self, b: u8) {
-        let mut wp = self.write_port.lock();
-        if let Some(ref mut port) = *wp {
-            let _ = port.write_all(&[b]);
-        }
-    }
-
+    pub fn realtime(&self, b: u8) { self.pipe.realtime(b); }
     pub fn feed_hold(&self) { self.realtime(b'!'); }
     pub fn resume(&self) { self.realtime(b'~'); }
+
     pub fn soft_reset(&self) {
         self.realtime(0x18);
-        self.queue.lock().clear();
+        self.pipe.clear();
     }
+
     pub fn start_job(self: &Arc<Self>) {
         {
             let mut j = self.job.write();
@@ -193,22 +304,25 @@ impl Engine {
     }
 
     pub fn step_line(&self) {
-        let mut j = self.job.write();
-        if j.current_line >= j.lines.len() { return; }
-        if j.current_line < j.violated_lines.len() && j.violated_lines[j.current_line] {
-            let msg = format!("SOFT LIMIT at line {}: blocked", j.current_line + 1);
+        loop {
+            let mut j = self.job.write();
+            if j.current_line >= j.lines.len() { return; }
+            if j.current_line < j.violated_lines.len() && j.violated_lines[j.current_line] {
+                let msg = format!("SOFT LIMIT at line {}: blocked", j.current_line + 1);
+                drop(j);
+                self.pipe.log(msg);
+                return;
+            }
+            let line = j.lines[j.current_line].clone();
+            let z_locked = j.z_locked;
+            j.current_line += 1;
             drop(j);
-            self.log(msg);
-            return;
-        }
-        let line = j.lines[j.current_line].clone();
-        let z_locked = j.z_locked;
-        j.current_line += 1;
-        drop(j);
-        let mut stripped = strip_gcode_comments(&line).trim().to_string();
-        if z_locked { stripped = strip_z_words(&stripped); }
-        if !stripped.is_empty() {
-            self.send(&stripped);
+            let mut stripped = strip_gcode_comments(&line).trim().to_string();
+            if z_locked { stripped = strip_z_words(&stripped); }
+            if !stripped.is_empty() {
+                self.pipe.send(&stripped);
+                return;
+            }
         }
     }
 
@@ -224,10 +338,13 @@ impl Engine {
         let z_locked = j.z_locked;
         let violated_lines = j.violated_lines.clone();
         drop(j);
+
+        let cancel = || self.job.read().status != JobStatus::Running;
+
         for (i, line) in lines.iter().enumerate() {
-            if self.job.read().status != JobStatus::Running { return; }
+            if cancel() { return; }
             if i < violated_lines.len() && violated_lines[i] {
-                self.log(format!("SOFT LIMIT at line {}: {}", i + 1, line.trim()));
+                self.pipe.log(format!("SOFT LIMIT at line {}: {}", i + 1, line.trim()));
                 self.job.write().status = JobStatus::Idle;
                 return;
             }
@@ -237,37 +354,25 @@ impl Engine {
                 self.job.write().current_line = i + 1;
                 continue;
             }
-            let to_send = {
-                let mut q = self.queue.lock();
-                q.enqueue(stripped);
-                q.flush()
-            };
-            write_lines(&self.write_port, &to_send);
+            if !self.pipe.send_blocking(&stripped, &cancel) {
+                return;
+            }
             self.job.write().current_line = i + 1;
         }
-        self.job.write().status = JobStatus::Complete;
-    }
-}
 
-fn write_lines(write_port: &WritePort, lines: &[String]) {
-    let mut wp = write_port.lock();
-    if let Some(ref mut port) = *wp {
-        for line in lines {
-            let _ = port.write_all(line.as_bytes());
-            let _ = port.write_all(b"\n");
+        self.pipe.wait_idle(&cancel);
+        if !cancel() {
+            self.job.write().status = JobStatus::Complete;
         }
     }
 }
-
-type OnLog = Arc<Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>>;
 
 fn read_loop(
     mut reader: BufReader<Box<dyn serialport::SerialPort>>,
     stop: Arc<AtomicBool>,
     state: Arc<RwLock<MachineState>>,
-    queue: Arc<Mutex<SendQueue>>,
-    write_port: WritePort,
-    on_log: OnLog,
+    job: Arc<RwLock<JobState>>,
+    pipe: Arc<SendPipe>,
 ) {
     let mut buf = String::new();
     loop {
@@ -279,10 +384,8 @@ fn read_loop(
                 let line = buf.trim().to_string();
                 if line.is_empty() { continue; }
                 let r = parse_response(&line);
-                apply_response(&r, &state, &queue, &write_port);
-                if let Some(ref cb) = *on_log.lock() {
-                    cb(line);
-                }
+                apply_response(&r, &state, &job, &pipe);
+                pipe.log(line);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
             Err(_) => return,
@@ -290,31 +393,23 @@ fn read_loop(
     }
 }
 
-fn poll_loop(stop: Arc<AtomicBool>, write_port: WritePort) {
+fn poll_loop(stop: Arc<AtomicBool>, pipe: Arc<SendPipe>) {
     loop {
         std::thread::sleep(Duration::from_millis(200));
         if stop.load(Ordering::Relaxed) { return; }
-        let mut wp = write_port.lock();
-        if let Some(ref mut port) = *wp {
-            let _ = port.write_all(&[b'?']);
-        }
+        pipe.realtime(b'?');
     }
 }
 
 fn apply_response(
     r: &Response,
     state: &Arc<RwLock<MachineState>>,
-    queue: &Arc<Mutex<SendQueue>>,
-    write_port: &WritePort,
+    job: &Arc<RwLock<JobState>>,
+    pipe: &SendPipe,
 ) {
     match r.resp_type {
         ResponseType::Ok | ResponseType::Error => {
-            let to_send = {
-                let mut q = queue.lock();
-                q.ack();
-                q.flush()
-            };
-            write_lines(write_port, &to_send);
+            pipe.ack();
         }
         ResponseType::Status => {
             let mut s = state.write();
@@ -342,9 +437,10 @@ fn apply_response(
             if r.spindle_ovr != 0 { s.spindle_ovr = r.spindle_ovr; }
         }
         ResponseType::Alarm => {
-            let mut s = state.write();
-            s.status = Status::Alarm;
-            s.alarm_code = r.alarm_code;
+            state.write().status = Status::Alarm;
+            state.write().alarm_code = r.alarm_code;
+            job.write().status = JobStatus::Idle;
+            pipe.clear();
         }
         ResponseType::Setting => {
             let mut s = state.write();
@@ -429,5 +525,11 @@ mod tests {
         q.ack();
         let after = q.in_flight_bytes();
         assert!(after < before);
+    }
+
+    #[test]
+    fn strip_comments_dollar() {
+        assert_eq!(strip_gcode_comments("$$"), "$$");
+        assert_eq!(strip_gcode_comments("$20=0"), "$20=0");
     }
 }

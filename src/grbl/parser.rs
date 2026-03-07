@@ -93,7 +93,8 @@ pub fn parse_response(line: &str) -> Response {
     }
     if line.starts_with('$') && line.contains('=') {
         if let Some((num_str, val_str)) = line[1..].split_once('=') {
-            if let (Ok(num), Ok(val)) = (num_str.parse::<i32>(), val_str.parse::<f32>()) {
+            let val_clean = val_str.split_whitespace().next().unwrap_or("");
+            if let (Ok(num), Ok(val)) = (num_str.parse::<i32>(), val_clean.parse::<f32>()) {
                 return Response {
                     resp_type: ResponseType::Setting,
                     setting_num: num,
@@ -160,6 +161,8 @@ fn parse_status_word(s: &str) -> Status {
         "Home" => Status::Home,
         "Check" => Status::Check,
         "Jog" => Status::Jog,
+        "Door" => Status::Door,
+        "Sleep" => Status::Sleep,
         _ => Status::Disconnected,
     }
 }
@@ -225,6 +228,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_status_door() {
+        let r = parse_response("<Door:0|MPos:0.000,0.000,0.000,0.000|Bf:35,111|FS:0,9000>");
+        assert_eq!(r.resp_type, ResponseType::Status);
+        assert_eq!(r.status, Status::Door);
+        assert_eq!(r.mpos, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+    }
+
+    #[test]
     fn parse_msg() {
         let r = parse_response("[MSG:Caution: Unlocked]");
         assert_eq!(r.resp_type, ResponseType::Msg);
@@ -241,5 +252,21 @@ mod tests {
     fn parse_unknown() {
         let r = parse_response("something unexpected");
         assert_eq!(r.resp_type, ResponseType::Unknown);
+    }
+
+    #[test]
+    fn parse_setting_with_description() {
+        let r = parse_response("$20=1 (soft limits,bool)");
+        assert_eq!(r.resp_type, ResponseType::Setting);
+        assert_eq!(r.setting_num, 20);
+        assert_eq!(r.setting_val, 1.0);
+    }
+
+    #[test]
+    fn parse_setting_float_with_description() {
+        let r = parse_response("$130=150.000 (X aixs max travel:mm)");
+        assert_eq!(r.resp_type, ResponseType::Setting);
+        assert_eq!(r.setting_num, 130);
+        assert_eq!(r.setting_val, 150.0);
     }
 }
