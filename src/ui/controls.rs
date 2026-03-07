@@ -91,7 +91,7 @@ fn connection_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineS
             }
         } else if cols[1].add_sized([cols[1].available_width(), 28.0], wide_btn_colored("CONNECT", egui::Color32::from_rgb(0x00, 0x66, 0x33))).clicked() {
             if let Some(port) = state.port_list.get(state.port_index) {
-                let _ = engine.connect(port, 115200);
+                let _ = engine.connect(port, 115200, &CUBIKO);
             }
         }
     });
@@ -119,6 +119,20 @@ fn status_section(ui: &mut egui::Ui, mstate: &MachineState) {
     ui.add_space(2.0);
     ui.label(egui::RichText::new("MACHINE").size(11.0).color(DIM));
     position_row(ui, mstate.mpos, 13.0);
+
+    ui.add_space(4.0);
+    let env = CUBIKO.envelope;
+    ui.label(egui::RichText::new(format!("ENVELOPE  X:{:.0}  Y:{:.0}  Z:{:.0}", env.x, env.y, env.z)).size(11.0).color(DIM));
+    if mstate.connected {
+        let (sl_color, sl_text) = if mstate.soft_limits {
+            (GREEN, "FW SOFT LIMITS: ON")
+        } else {
+            (RED, "FW SOFT LIMITS: OFF")
+        };
+        ui.label(egui::RichText::new(sl_text).size(12.0).color(sl_color));
+        let mt = mstate.max_travel;
+        ui.label(egui::RichText::new(format!("FW TRAVEL  X:{:.0}  Y:{:.0}  Z:{:.0}", mt.x, mt.y, mt.z)).size(11.0).color(DIM));
+    }
 }
 
 fn position_row(ui: &mut egui::Ui, pos: Vec3, size: f32) {

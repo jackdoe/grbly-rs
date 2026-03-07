@@ -9,17 +9,21 @@ use crate::gcode;
 use crate::grbl::engine::Engine;
 use crate::grbl::state::*;
 
-pub fn load_file(path: &Path, job_lock: &RwLock<JobState>) {
+pub fn load_file(path: &Path, job_lock: &RwLock<JobState>, profile: &MachineProfile) {
     if let Ok(content) = std::fs::read_to_string(path) {
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let (segs, bmin, bmax) = gcode::parser::parse_with_bounds(&lines);
         let total_dist: f32 = segs.iter().map(|s| s.start.dist(s.end)).sum();
         let mut j = job_lock.write();
+        let (sv, lv) = compute_violations(&segs, lines.len(), profile, j.z_locked);
         j.lines = Arc::new(lines);
         j.segments = Arc::new(segs);
         j.bounds_min = bmin;
         j.bounds_max = bmax;
         j.total_dist = total_dist;
+        j.seg_violations = Arc::new(sv);
+        j.violated_lines = Arc::new(lv);
+        j.version += 1;
         j.status = JobStatus::Idle;
         j.current_line = 0;
     }
@@ -43,6 +47,7 @@ pub struct EditorState {
     pub sim_pos: Vec3,
     pub sim_feed: f32,
     pub z_locked: bool,
+    pub z_filter: bool,
     spindle_warn: Option<Instant>,
 }
 
@@ -58,20 +63,21 @@ impl Default for EditorState {
             sim_pos: Vec3::default(),
             sim_feed: 20.0,
             z_locked: false,
+            z_filter: false,
             spindle_warn: None,
         }
     }
 }
 
 fn btn(text: &str) -> egui::Button<'_> {
-    egui::Button::new(egui::RichText::new(text).size(12.0))
-        .min_size(egui::vec2(44.0, 22.0))
+    egui::Button::new(egui::RichText::new(text).size(11.0))
+        .min_size(egui::vec2(0.0, 20.0))
 }
 
 fn btn_col(text: &str, text_col: egui::Color32, fill: egui::Color32) -> egui::Button<'_> {
-    egui::Button::new(egui::RichText::new(text).size(12.0).color(text_col))
+    egui::Button::new(egui::RichText::new(text).size(11.0).color(text_col))
         .fill(fill)
-        .min_size(egui::vec2(44.0, 22.0))
+        .min_size(egui::vec2(0.0, 20.0))
 }
 
 pub fn draw(
@@ -92,9 +98,9 @@ pub fn draw(
 
     let has_lines = !jstate.lines.is_empty();
 
-    ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new("G-CODE").size(14.0).color(DIM).strong());
-        ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.label(egui::RichText::new("G-CODE").size(11.0).color(DIM).strong());
         if ui.add(btn("OPEN")).clicked() {
             let job_lock = job_lock.clone();
             std::thread::spawn(move || {
@@ -102,12 +108,12 @@ pub fn draw(
                     .add_filter("G-code", &["nc", "gcode", "ngc", "tap", "gc"])
                     .pick_file()
                 {
-                    load_file(&path, &job_lock);
+                    load_file(&path, &job_lock, &CUBIKO);
                 }
             });
         }
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("SIM:").size(11.0).color(CYAN));
+        ui.separator();
+        ui.label(egui::RichText::new("SIM").size(10.0).color(CYAN));
         if state.simulating && state.sim_playing {
             if ui.add(btn_col("PAUSE", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() {
                 state.sim_playing = false;
@@ -157,9 +163,9 @@ pub fn draw(
             let mut j = job_lock.write();
             j.current_line = 0;
         }
-        ui.add_space(12.0);
+        ui.separator();
         {
-            let zl_text = if state.z_locked { "Z-LOCK ON" } else { "Z-LOCK" };
+            let zl_text = if state.z_locked { "ZL ON" } else { "ZL" };
             let zl_fill = if state.z_locked {
                 egui::Color32::from_rgb(0x88, 0x00, 0x00)
             } else {
@@ -167,12 +173,28 @@ pub fn draw(
             };
             if ui.add(btn_col(zl_text, RED, zl_fill)).clicked() {
                 state.z_locked = !state.z_locked;
-                job_lock.write().z_locked = state.z_locked;
+                let mut j = job_lock.write();
+                j.z_locked = state.z_locked;
+                let (sv, lv) = compute_violations(&j.segments, j.lines.len(), profile, j.z_locked);
+                j.seg_violations = Arc::new(sv);
+                j.violated_lines = Arc::new(lv);
+                j.version += 1;
+            }
+        }
+        {
+            let zf_text = if state.z_filter { "ZF ON" } else { "ZF" };
+            let zf_fill = if state.z_filter {
+                egui::Color32::from_rgb(0x00, 0x44, 0x88)
+            } else {
+                egui::Color32::from_rgb(0x11, 0x11, 0x22)
+            };
+            if ui.add(btn_col(zf_text, CYAN, zf_fill)).clicked() {
+                state.z_filter = !state.z_filter;
             }
         }
 
-        ui.add_space(12.0);
-        ui.label(egui::RichText::new("LIVE:").size(11.0).color(RED));
+        ui.separator();
+        ui.label(egui::RichText::new("LIVE").size(10.0).color(RED));
         if ui.add(btn_col("RESET", AMBER, egui::Color32::from_rgb(0x22, 0x11, 0x00))).clicked() {
             engine.reset_job();
         }
@@ -227,6 +249,11 @@ pub fn draw(
             let mut remaining = state.sim_feed * dt;
 
             while remaining > 0.0 && state.sim_seg < segments.len() {
+                if jstate.seg_violations.get(state.sim_seg).copied().unwrap_or(false) {
+                    state.sim_playing = false;
+                    state.warning = format!("SOFT LIMIT at line {}", segments[state.sim_seg].line + 1);
+                    break;
+                }
                 let seg = &segments[state.sim_seg];
                 let seg_len = seg.start.dist(seg.end);
                 let left_in_seg = (1.0 - state.sim_frac) * seg_len;
@@ -270,44 +297,87 @@ pub fn draw(
         return;
     }
 
-    ui.label(egui::RichText::new(format!("{} lines  [{}]", jstate.lines.len(), current)).size(11.0).color(DIM));
+    let z_lines: Vec<usize> = if state.z_filter {
+        (0..jstate.lines.len()).filter(|&i| has_z_word(&jstate.lines[i])).collect()
+    } else {
+        Vec::new()
+    };
+
+    if state.z_filter {
+        ui.label(egui::RichText::new(format!("{} Z-lines  [{}]", z_lines.len(), current)).size(11.0).color(DIM));
+    } else {
+        ui.label(egui::RichText::new(format!("{} lines  [{}]", jstate.lines.len(), current)).size(11.0).color(DIM));
+    }
 
     let row_h = 17.0;
-    let n = jstate.lines.len();
-    let window_radius = 80;
-    let win_start = current.saturating_sub(window_radius);
-    let win_end = (current + window_radius).min(n);
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false; 2])
-        .show(ui, |ui| {
-            if win_start > 0 {
-                ui.allocate_space(egui::vec2(ui.available_width(), win_start as f32 * row_h));
-            }
-
-            for i in win_start..win_end {
-                let is_current = running && i == current;
-                let r = ui.horizontal(|ui| {
+    if state.z_filter {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                for &i in &z_lines {
+                    let is_current = running && i == current;
+                    let r = ui.horizontal(|ui| {
+                        if is_current {
+                            ui.painter().rect_filled(
+                                ui.available_rect_before_wrap(),
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(0xff, 0xaa, 0x00, 0x22),
+                            );
+                        }
+                        ui.label(egui::RichText::new(format!("{:>5}", i + 1)).size(12.0).color(LINE_NUM));
+                        let is_violated = jstate.violated_lines.get(i).copied().unwrap_or(false);
+                        let line_col = if is_current { AMBER } else if is_violated { RED } else { CODE_TEXT };
+                        ui.label(egui::RichText::new("Z").size(12.0).color(CYAN));
+                        ui.label(egui::RichText::new(&jstate.lines[i]).size(12.0).color(line_col));
+                    });
                     if is_current {
-                        ui.painter().rect_filled(
-                            ui.available_rect_before_wrap(),
-                            0.0,
-                            egui::Color32::from_rgba_unmultiplied(0xff, 0xaa, 0x00, 0x22),
-                        );
+                        r.response.scroll_to_me(Some(egui::Align::Center));
                     }
-                    ui.label(egui::RichText::new(format!("{:>5}", i + 1)).size(12.0).color(LINE_NUM));
-                    let line_col = if is_current { AMBER } else { CODE_TEXT };
-                    ui.label(egui::RichText::new(&jstate.lines[i]).size(12.0).color(line_col));
-                });
-                if is_current {
-                    r.response.scroll_to_me(Some(egui::Align::Center));
                 }
-            }
+            });
+    } else {
+        let n = jstate.lines.len();
+        let window_radius = 80;
+        let win_start = current.saturating_sub(window_radius);
+        let win_end = (current + window_radius).min(n);
 
-            if win_end < n {
-                ui.allocate_space(egui::vec2(ui.available_width(), (n - win_end) as f32 * row_h));
-            }
-        });
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                if win_start > 0 {
+                    ui.allocate_space(egui::vec2(ui.available_width(), win_start as f32 * row_h));
+                }
+
+                for i in win_start..win_end {
+                    let is_current = running && i == current;
+                    let has_z = has_z_word(&jstate.lines[i]);
+                    let r = ui.horizontal(|ui| {
+                        if is_current {
+                            ui.painter().rect_filled(
+                                ui.available_rect_before_wrap(),
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(0xff, 0xaa, 0x00, 0x22),
+                            );
+                        }
+                        ui.label(egui::RichText::new(format!("{:>5}", i + 1)).size(12.0).color(LINE_NUM));
+                        if has_z {
+                            ui.label(egui::RichText::new("Z").size(12.0).color(CYAN));
+                        }
+                        let is_violated = jstate.violated_lines.get(i).copied().unwrap_or(false);
+                        let line_col = if is_current { AMBER } else if is_violated { RED } else { CODE_TEXT };
+                        ui.label(egui::RichText::new(&jstate.lines[i]).size(12.0).color(line_col));
+                    });
+                    if is_current {
+                        r.response.scroll_to_me(Some(egui::Align::Center));
+                    }
+                }
+
+                if win_end < n {
+                    ui.allocate_space(egui::vec2(ui.available_width(), (n - win_end) as f32 * row_h));
+                }
+            });
+    }
 }
 
 fn seg_to_line(segments: &[Segment], seg_idx: usize) -> usize {
@@ -316,6 +386,20 @@ fn seg_to_line(segments: &[Segment], seg_idx: usize) -> usize {
     } else {
         segments.last().map(|s| s.line + 1).unwrap_or(0)
     }
+}
+
+fn has_z_word(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    for i in 0..bytes.len() {
+        if (bytes[i] == b'Z' || bytes[i] == b'z')
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphabetic()))
+            && i + 1 < bytes.len()
+            && (bytes[i + 1] == b'-' || bytes[i + 1] == b'.' || bytes[i + 1].is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn check_bounds(jstate: &JobState, profile: &MachineProfile) -> String {

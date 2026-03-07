@@ -14,7 +14,7 @@ pub struct Scene {
     trail_points: Vec<V3>,
     trail_dirty: bool,
     last_pos: V3,
-    last_seg_version: usize,
+    last_version: usize,
 }
 
 const LINE_W: f32 = 0.3;
@@ -39,7 +39,7 @@ impl Scene {
             trail_points: Vec::new(),
             trail_dirty: false,
             last_pos: V3::default(),
-            last_seg_version: 0,
+            last_version: 0,
         }
     }
 
@@ -62,11 +62,10 @@ impl Scene {
             self.trail_dirty = false;
         }
 
-        let seg_count = jstate.segments.len();
-        if seg_count != self.last_seg_version {
-            self.last_seg_version = seg_count;
+        if jstate.version != self.last_version {
+            self.last_version = jstate.version;
             if !jstate.segments.is_empty() {
-                self.toolpath = Some(build_toolpath(context, &jstate.segments, jstate.bounds_min, jstate.bounds_max));
+                self.toolpath = Some(build_toolpath(context, &jstate.segments, &jstate.seg_violations, jstate.bounds_min, jstate.bounds_max));
                 self.bounds_box = Some(build_wire_box(context, jstate.bounds_min, jstate.bounds_max, Srgba::new(0x55, 0x55, 0x77, 0x66), GRID_W));
             } else {
                 self.toolpath = None;
@@ -191,15 +190,18 @@ fn build_triad(context: &Context) -> Gm<Mesh, ColorMaterial> {
     lb.build(context)
 }
 
-fn build_toolpath(context: &Context, segments: &[Segment], bmin: V3, bmax: V3) -> Gm<Mesh, ColorMaterial> {
+fn build_toolpath(context: &Context, segments: &[Segment], seg_violations: &[bool], bmin: V3, bmax: V3) -> Gm<Mesh, ColorMaterial> {
     let mut lb = LineBuilder::new();
-    for seg in segments {
-        let color = if seg.rapid {
+    for (i, seg) in segments.iter().enumerate() {
+        let violated = seg_violations.get(i).copied().unwrap_or(false);
+        let color = if violated {
+            Srgba::new(0xff, 0x22, 0x22, 0xff)
+        } else if seg.rapid {
             Srgba::new(0xff, 0x88, 0x00, 0xff)
         } else {
             depth_color(seg.end.z, bmin.z, bmax.z)
         };
-        let w = if seg.rapid { GRID_W } else { LINE_W };
+        let w = if violated { THICK_W } else if seg.rapid { GRID_W } else { LINE_W };
         lb.add(seg.start, seg.end, color, w);
     }
     lb.build(context)

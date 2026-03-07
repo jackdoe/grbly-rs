@@ -84,7 +84,13 @@ impl Engine {
         *self.on_log.lock() = Some(Arc::new(f));
     }
 
-    pub fn connect(&self, port: &str, baud: u32) -> std::io::Result<()> {
+    fn log(&self, msg: String) {
+        if let Some(ref cb) = *self.on_log.lock() {
+            cb(msg);
+        }
+    }
+
+    pub fn connect(&self, port: &str, baud: u32, profile: &MachineProfile) -> std::io::Result<()> {
         let serial = Serial::open(port, baud)?;
         let (write_port, reader) = serial.into_parts();
 
@@ -115,6 +121,13 @@ impl Engine {
             let stop = stop.clone();
             std::thread::spawn(move || poll_loop(stop, write_port));
         }
+
+        let env = profile.envelope;
+        self.send("$20=1");
+        self.send(&format!("$130={:.0}", env.x));
+        self.send(&format!("$131={:.0}", env.y));
+        self.send(&format!("$132={:.0}", env.z));
+        self.send("$$");
 
         Ok(())
     }
@@ -182,6 +195,12 @@ impl Engine {
     pub fn step_line(&self) {
         let mut j = self.job.write();
         if j.current_line >= j.lines.len() { return; }
+        if j.current_line < j.violated_lines.len() && j.violated_lines[j.current_line] {
+            let msg = format!("SOFT LIMIT at line {}: blocked", j.current_line + 1);
+            drop(j);
+            self.log(msg);
+            return;
+        }
         let line = j.lines[j.current_line].clone();
         let z_locked = j.z_locked;
         j.current_line += 1;
@@ -203,9 +222,15 @@ impl Engine {
         let j = self.job.read();
         let lines = j.lines.clone();
         let z_locked = j.z_locked;
+        let violated_lines = j.violated_lines.clone();
         drop(j);
         for (i, line) in lines.iter().enumerate() {
             if self.job.read().status != JobStatus::Running { return; }
+            if i < violated_lines.len() && violated_lines[i] {
+                self.log(format!("SOFT LIMIT at line {}: {}", i + 1, line.trim()));
+                self.job.write().status = JobStatus::Idle;
+                return;
+            }
             let mut stripped = strip_gcode_comments(line).trim().to_string();
             if z_locked { stripped = strip_z_words(&stripped); }
             if stripped.is_empty() {
@@ -320,6 +345,16 @@ fn apply_response(
             let mut s = state.write();
             s.status = Status::Alarm;
             s.alarm_code = r.alarm_code;
+        }
+        ResponseType::Setting => {
+            let mut s = state.write();
+            match r.setting_num {
+                20 => s.soft_limits = r.setting_val != 0.0,
+                130 => s.max_travel.x = r.setting_val,
+                131 => s.max_travel.y = r.setting_val,
+                132 => s.max_travel.z = r.setting_val,
+                _ => {}
+            }
         }
         ResponseType::Welcome => {
             let mut s = state.write();

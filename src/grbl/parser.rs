@@ -7,6 +7,7 @@ pub enum ResponseType {
     Alarm,
     Status,
     Msg,
+    Setting,
     Welcome,
     Unknown,
 }
@@ -30,6 +31,8 @@ pub struct Response {
     pub rapid_ovr: i32,
     pub spindle_ovr: i32,
     pub message: String,
+    pub setting_num: i32,
+    pub setting_val: f32,
 }
 
 impl Default for Response {
@@ -51,6 +54,8 @@ impl Default for Response {
             rapid_ovr: 0,
             spindle_ovr: 0,
             message: String::new(),
+            setting_num: 0,
+            setting_val: 0.0,
         }
     }
 }
@@ -85,6 +90,18 @@ pub fn parse_response(line: &str) -> Response {
     }
     if line.starts_with("Grbl ") {
         return Response { resp_type: ResponseType::Welcome, ..Default::default() };
+    }
+    if line.starts_with('$') && line.contains('=') {
+        if let Some((num_str, val_str)) = line[1..].split_once('=') {
+            if let (Ok(num), Ok(val)) = (num_str.parse::<i32>(), val_str.parse::<f32>()) {
+                return Response {
+                    resp_type: ResponseType::Setting,
+                    setting_num: num,
+                    setting_val: val,
+                    ..Default::default()
+                };
+            }
+        }
     }
     Response::default()
 }

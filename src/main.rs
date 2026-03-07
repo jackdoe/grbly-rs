@@ -270,7 +270,7 @@ fn main() {
                     *control_flow = ControlFlow::Exit;
                 }
                 winit::event::WindowEvent::DroppedFile(path) => {
-                    ui::editor::load_file(path, &job);
+                    ui::editor::load_file(path, &job, &CUBIKO);
                     let size = winit_window.inner_size();
                     #[allow(deprecated)]
                     let fake = winit::event::WindowEvent::CursorMoved {
