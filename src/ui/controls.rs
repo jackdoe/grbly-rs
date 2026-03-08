@@ -3,6 +3,7 @@ use three_d::egui;
 use crate::grbl::engine::Engine;
 use crate::grbl::serial;
 use crate::grbl::state::*;
+use crate::ui::scene::MaterialState;
 
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
 const DIM: egui::Color32 = egui::Color32::from_rgb(0x88, 0x77, 0x44);
@@ -15,11 +16,25 @@ pub struct ControlsState {
     pub port_list: Vec<String>,
     pub port_index: usize,
     pub jog_step: f32,
+    pub travel_x: String,
+    pub travel_y: String,
+    pub travel_z: String,
+    last_max_travel: Vec3,
+    soft_limit_warning: String,
 }
 
 impl Default for ControlsState {
     fn default() -> Self {
-        Self { port_list: Vec::new(), port_index: 0, jog_step: 1.0 }
+        Self {
+            port_list: Vec::new(),
+            port_index: 0,
+            jog_step: 1.0,
+            travel_x: String::new(),
+            travel_y: String::new(),
+            travel_z: String::new(),
+            last_max_travel: Vec3::default(),
+            soft_limit_warning: String::new(),
+        }
     }
 }
 
@@ -44,6 +59,8 @@ pub fn draw(
     mstate: &MachineState,
     jstate: &JobState,
     ui_state: &mut ControlsState,
+    material: &mut MaterialState,
+    material_version: &mut u32,
 ) {
     egui::SidePanel::left("controls")
         .default_width(280.0)
@@ -53,13 +70,15 @@ pub fn draw(
                 ui.set_min_width(ui.available_width());
                 connection_section(ui, engine, mstate, ui_state);
                 ui.separator();
-                status_section(ui, engine, mstate);
+                status_section(ui, engine, mstate, ui_state);
                 ui.separator();
                 jog_section(ui, engine, ui_state);
                 ui.separator();
                 overrides_section(ui, engine, mstate);
                 ui.separator();
                 actions_section(ui, engine);
+                ui.separator();
+                material_section(ui, material, material_version);
                 ui.separator();
                 job_section(ui, engine, jstate);
             });
@@ -88,10 +107,12 @@ fn connection_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineS
         if mstate.connected {
             if cols[1].add_sized([cols[1].available_width(), 28.0], wide_btn_colored("DISCONNECT", RED)).clicked() {
                 engine.disconnect();
+                state.last_max_travel = Vec3::default();
             }
         } else if cols[1].add_sized([cols[1].available_width(), 28.0], wide_btn_colored("CONNECT", egui::Color32::from_rgb(0x00, 0x66, 0x33))).clicked() {
             if let Some(port) = state.port_list.get(state.port_index) {
                 let _ = engine.connect(port, 115200);
+                state.last_max_travel = Vec3::default();
             }
         }
     });
@@ -107,7 +128,7 @@ fn connection_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineS
     });
 }
 
-fn status_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState) {
+fn status_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState, state: &mut ControlsState) {
     section(ui, "Status");
     let (color, text) = status_display(mstate.status);
     ui.label(egui::RichText::new(format!("[ {} ]", text)).size(20.0).color(color).strong());
@@ -121,8 +142,8 @@ fn status_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState
     position_row(ui, mstate.mpos, 13.0);
 
     ui.add_space(4.0);
-    let env = CUBIKO.envelope;
-    ui.label(egui::RichText::new(format!("ENVELOPE  X:{:.0}  Y:{:.0}  Z:{:.0}", env.x, env.y, env.z)).size(11.0).color(DIM));
+    let mt = mstate.max_travel;
+    if mt.x > 0.0 { ui.label(egui::RichText::new(format!("TRAVEL  X:{:.1}  Y:{:.1}  Z:{:.1}", mt.x, mt.y, mt.z)).size(11.0).color(DIM)); }
     if mstate.connected {
         ui.horizontal(|ui| {
             let (sl_color, sl_text) = if mstate.soft_limits {
@@ -141,18 +162,70 @@ fn status_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState
                 .fill(toggle_fill)
                 .min_size(egui::vec2(0.0, 20.0));
             if ui.add(btn).clicked() {
-                // Unlock first in case GRBL is in alarm/locked state
-                engine.send("$X");
                 if mstate.soft_limits {
+                    // Disabling soft limits always works
+                    if mstate.status == Status::Alarm || mstate.status == Status::Door {
+                        engine.send("$X");
+                    }
                     engine.send("$20=0");
+                    engine.send("$$");
+                    state.soft_limit_warning = String::new();
                 } else {
-                    engine.send("$20=1");
+                    // Enabling soft limits requires all travel axes to be non-zero
+                    let has_zero = mt.x == 0.0 || mt.y == 0.0 || mt.z == 0.0;
+                    if has_zero {
+                        let mut zero_axes = Vec::new();
+                        if mt.x == 0.0 { zero_axes.push("X ($130)"); }
+                        if mt.y == 0.0 { zero_axes.push("Y ($131)"); }
+                        if mt.z == 0.0 { zero_axes.push("Z ($132)"); }
+                        state.soft_limit_warning = format!(
+                            "Cannot enable soft limits: {} travel is 0. Set travel values first.",
+                            zero_axes.join(", ")
+                        );
+                    } else {
+                        if mstate.status == Status::Alarm || mstate.status == Status::Door {
+                            engine.send("$X");
+                        }
+                        engine.send("$20=1");
+                        engine.send("$$");
+                        state.soft_limit_warning = String::new();
+                    }
                 }
+            }
+        });
+
+        // Show soft limit warning if any
+        if !state.soft_limit_warning.is_empty() {
+            ui.label(egui::RichText::new(&state.soft_limit_warning).size(11.0).color(AMBER));
+        }
+
+        // Re-sync text fields whenever max_travel changes
+        if mt != state.last_max_travel {
+            state.last_max_travel = mt;
+            state.travel_x = format!("{:.1}", mt.x);
+            state.travel_y = format!("{:.1}", mt.y);
+            state.travel_z = format!("{:.1}", mt.z);
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("TRAVEL").size(11.0).color(DIM));
+            let w = 38.0;
+            ui.label(egui::RichText::new("X").size(11.0).color(DIM));
+            ui.add(egui::TextEdit::singleline(&mut state.travel_x).desired_width(w).font(egui::TextStyle::Monospace));
+            ui.label(egui::RichText::new("Y").size(11.0).color(DIM));
+            ui.add(egui::TextEdit::singleline(&mut state.travel_y).desired_width(w).font(egui::TextStyle::Monospace));
+            ui.label(egui::RichText::new("Z").size(11.0).color(DIM));
+            ui.add(egui::TextEdit::singleline(&mut state.travel_z).desired_width(w).font(egui::TextStyle::Monospace));
+            if ui.add(egui::Button::new(egui::RichText::new("SET").size(11.0)).min_size(egui::vec2(0.0, 20.0))).clicked() {
+                let x: f32 = state.travel_x.trim().parse().unwrap_or(mt.x);
+                let y: f32 = state.travel_y.trim().parse().unwrap_or(mt.y);
+                let z: f32 = state.travel_z.trim().parse().unwrap_or(mt.z);
+                engine.send(&format!("$130={:.1}", x));
+                engine.send(&format!("$131={:.1}", y));
+                engine.send(&format!("$132={:.1}", z));
                 engine.send("$$");
             }
         });
-        let mt = mstate.max_travel;
-        ui.label(egui::RichText::new(format!("FW TRAVEL  X:{:.0}  Y:{:.0}  Z:{:.0}", mt.x, mt.y, mt.z)).size(11.0).color(DIM));
     }
 }
 
@@ -262,6 +335,53 @@ fn actions_section(ui: &mut egui::Ui, engine: &Arc<Engine>) {
             .min_size(egui::vec2(0.0, 28.0));
         if cols[1].add_sized([cols[1].available_width(), 28.0], off_btn).clicked() {
             engine.send("M5");
+        }
+    });
+}
+
+fn material_section(ui: &mut egui::Ui, material: &mut MaterialState, version: &mut u32) {
+    section(ui, "Material");
+    let changed = |mat: &mut MaterialState, ver: &mut u32| {
+        let w: f32 = mat.width_s.trim().parse().unwrap_or(mat.width);
+        let h: f32 = mat.height_s.trim().parse().unwrap_or(mat.height);
+        let t: f32 = mat.thickness_s.trim().parse().unwrap_or(mat.thickness);
+        let ox: f32 = mat.offset_x_s.trim().parse().unwrap_or(mat.offset_x);
+        let oy: f32 = mat.offset_y_s.trim().parse().unwrap_or(mat.offset_y);
+        if (w - mat.width).abs() > 0.001 || (h - mat.height).abs() > 0.001
+            || (t - mat.thickness).abs() > 0.001 || (ox - mat.offset_x).abs() > 0.001
+            || (oy - mat.offset_y).abs() > 0.001
+        {
+            mat.width = w; mat.height = h; mat.thickness = t;
+            mat.offset_x = ox; mat.offset_y = oy;
+            *ver = ver.wrapping_add(1);
+        }
+    };
+    let fw = ui.available_width() - 60.0;
+    let half = fw / 2.0;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("W").size(12.0).color(DIM));
+        if ui.add(egui::TextEdit::singleline(&mut material.width_s).desired_width(half).font(egui::TextStyle::Monospace)).changed() {
+            changed(material, version);
+        }
+        ui.label(egui::RichText::new("H").size(12.0).color(DIM));
+        if ui.add(egui::TextEdit::singleline(&mut material.height_s).desired_width(half).font(egui::TextStyle::Monospace)).changed() {
+            changed(material, version);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("T").size(12.0).color(DIM));
+        if ui.add(egui::TextEdit::singleline(&mut material.thickness_s).desired_width(half).font(egui::TextStyle::Monospace)).changed() {
+            changed(material, version);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("X").size(12.0).color(DIM));
+        if ui.add(egui::TextEdit::singleline(&mut material.offset_x_s).desired_width(half).font(egui::TextStyle::Monospace)).changed() {
+            changed(material, version);
+        }
+        ui.label(egui::RichText::new("Y").size(12.0).color(DIM));
+        if ui.add(egui::TextEdit::singleline(&mut material.offset_y_s).desired_width(half).font(egui::TextStyle::Monospace)).changed() {
+            changed(material, version);
         }
     });
 }

@@ -89,32 +89,3 @@ pub struct JobState {
     pub violated_lines: Arc<Vec<bool>>,
     pub version: usize,
 }
-
-pub struct MachineProfile {
-    pub envelope: Vec3,
-}
-
-pub const CUBIKO: MachineProfile = MachineProfile {
-    envelope: Vec3 { x: 145.0, y: 110.0, z: 40.0 },
-};
-
-impl MachineProfile {
-    pub fn violates(&self, pos: Vec3, z_locked: bool) -> bool {
-        pos.x < 0.0 || pos.x > self.envelope.x
-            || pos.y < 0.0 || pos.y > self.envelope.y
-            || (!z_locked && (pos.z < -self.envelope.z || pos.z > self.envelope.z))
-    }
-}
-
-pub fn compute_violations(segments: &[Segment], line_count: usize, profile: &MachineProfile, z_locked: bool) -> (Vec<bool>, Vec<bool>) {
-    let seg_v: Vec<bool> = segments.iter().map(|s| {
-        profile.violates(s.start, z_locked) || profile.violates(s.end, z_locked)
-    }).collect();
-    let mut line_v = vec![false; line_count];
-    for (i, seg) in segments.iter().enumerate() {
-        if seg_v[i] && seg.line < line_v.len() {
-            line_v[seg.line] = true;
-        }
-    }
-    (seg_v, line_v)
-}

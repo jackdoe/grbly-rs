@@ -8,21 +8,21 @@ use three_d::egui;
 use crate::gcode;
 use crate::grbl::engine::Engine;
 use crate::grbl::state::*;
+use crate::ui::scene::MaterialState;
 
-pub fn load_file(path: &Path, job_lock: &RwLock<JobState>, profile: &MachineProfile) {
+pub fn load_file(path: &Path, job_lock: &RwLock<JobState>) {
     if let Ok(content) = std::fs::read_to_string(path) {
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let (segs, bmin, bmax) = gcode::parser::parse_with_bounds(&lines);
         let total_dist: f32 = segs.iter().map(|s| s.start.dist(s.end)).sum();
         let mut j = job_lock.write();
-        let (sv, lv) = compute_violations(&segs, lines.len(), profile, j.z_locked);
+        j.seg_violations = Arc::new(vec![false; segs.len()]);
+        j.violated_lines = Arc::new(vec![false; lines.len()]);
         j.lines = Arc::new(lines);
         j.segments = Arc::new(segs);
         j.bounds_min = bmin;
         j.bounds_max = bmax;
         j.total_dist = total_dist;
-        j.seg_violations = Arc::new(sv);
-        j.violated_lines = Arc::new(lv);
         j.version += 1;
         j.status = JobStatus::Idle;
         j.current_line = 0;
@@ -49,6 +49,7 @@ pub struct EditorState {
     pub z_locked: bool,
     pub z_filter: bool,
     spindle_warn: Option<Instant>,
+    last_material_vals: (f32, f32, f32, f32, f32),
 }
 
 impl Default for EditorState {
@@ -65,6 +66,7 @@ impl Default for EditorState {
             z_locked: false,
             z_filter: false,
             spindle_warn: None,
+            last_material_vals: (0.0, 0.0, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -87,7 +89,8 @@ pub fn draw(
     jstate: &JobState,
     job_lock: &Arc<RwLock<JobState>>,
     state: &mut EditorState,
-    profile: &MachineProfile,
+    material: &mut MaterialState,
+    material_version: &mut u32,
 ) {
     let spindle_warning_active = state.spindle_warn
         .map(|t| t.elapsed().as_secs() < 3)
@@ -108,7 +111,7 @@ pub fn draw(
                     .add_filter("G-code", &["nc", "gcode", "ngc", "tap", "gc"])
                     .pick_file()
                 {
-                    load_file(&path, &job_lock, &CUBIKO);
+                    load_file(&path, &job_lock);
                 }
             });
         }
@@ -117,6 +120,7 @@ pub fn draw(
         if state.simulating && state.sim_playing {
             if ui.add(btn_col("PAUSE", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() {
                 state.sim_playing = false;
+            state.simulating = false;
             }
         } else if ui.add(btn_col("PLAY", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() && has_lines {
             if !state.simulating {
@@ -159,9 +163,9 @@ pub fn draw(
             state.sim_seg = 0;
             state.sim_frac = 0.0;
             state.sim_playing = false;
+            state.simulating = false;
             state.sim_pos = Vec3::default();
-            let mut j = job_lock.write();
-            j.current_line = 0;
+            job_lock.write().current_line = 0;
         }
         ui.separator();
         {
@@ -175,9 +179,6 @@ pub fn draw(
                 state.z_locked = !state.z_locked;
                 let mut j = job_lock.write();
                 j.z_locked = state.z_locked;
-                let (sv, lv) = compute_violations(&j.segments, j.lines.len(), profile, j.z_locked);
-                j.seg_violations = Arc::new(sv);
-                j.violated_lines = Arc::new(lv);
                 j.version += 1;
             }
         }
@@ -221,6 +222,42 @@ pub fn draw(
         });
     }
 
+    // Material settings row
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.label(egui::RichText::new("MAT").size(10.0).color(GREEN));
+        let fw = 32.0;
+        ui.label(egui::RichText::new("W").size(10.0).color(DIM));
+        ui.add(egui::TextEdit::singleline(&mut material.width_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.label(egui::RichText::new("H").size(10.0).color(DIM));
+        ui.add(egui::TextEdit::singleline(&mut material.height_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.label(egui::RichText::new("T").size(10.0).color(DIM));
+        ui.add(egui::TextEdit::singleline(&mut material.thickness_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.label(egui::RichText::new("X").size(10.0).color(DIM));
+        ui.add(egui::TextEdit::singleline(&mut material.offset_x_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.label(egui::RichText::new("Y").size(10.0).color(DIM));
+        ui.add(egui::TextEdit::singleline(&mut material.offset_y_s).desired_width(fw).font(egui::TextStyle::Monospace));
+    });
+
+    // Auto-apply material changes: parse fields and bump version if values differ
+    {
+        let pw: f32 = material.width_s.trim().parse().unwrap_or(material.width);
+        let ph: f32 = material.height_s.trim().parse().unwrap_or(material.height);
+        let pt: f32 = material.thickness_s.trim().parse().unwrap_or(material.thickness);
+        let px: f32 = material.offset_x_s.trim().parse().unwrap_or(material.offset_x);
+        let py: f32 = material.offset_y_s.trim().parse().unwrap_or(material.offset_y);
+        let new_vals = (pw, ph, pt, px, py);
+        if new_vals != state.last_material_vals {
+            state.last_material_vals = new_vals;
+            material.width = pw;
+            material.height = ph;
+            material.thickness = pt;
+            material.offset_x = px;
+            material.offset_y = py;
+            *material_version = material_version.wrapping_add(1);
+        }
+    }
+
     if !state.warning.is_empty() {
         let frame = egui::Frame::default()
             .fill(egui::Color32::from_rgb(0x55, 0x22, 0x00))
@@ -251,6 +288,7 @@ pub fn draw(
             while remaining > 0.0 && state.sim_seg < segments.len() {
                 if jstate.seg_violations.get(state.sim_seg).copied().unwrap_or(false) {
                     state.sim_playing = false;
+            state.simulating = false;
                     state.warning = format!("SOFT LIMIT at line {}", segments[state.sim_seg].line + 1);
                     break;
                 }
@@ -270,6 +308,7 @@ pub fn draw(
 
             if state.sim_seg >= segments.len() {
                 state.sim_playing = false;
+            state.simulating = false;
                 state.sim_pos = segments.last().map(|s| s.end).unwrap_or_default();
                 job_lock.write().status = JobStatus::Complete;
             } else {
@@ -281,7 +320,7 @@ pub fn draw(
         }
     }
 
-    state.warning = check_bounds(jstate, profile);
+    state.warning = String::new();
 
     let current = if state.simulating {
         job_lock.read().current_line
@@ -400,25 +439,4 @@ fn has_z_word(line: &str) -> bool {
         }
     }
     false
-}
-
-fn check_bounds(jstate: &JobState, profile: &MachineProfile) -> String {
-    if jstate.segments.is_empty() {
-        return String::new();
-    }
-    let env = profile.envelope;
-    let bmin = jstate.bounds_min;
-    let bmax = jstate.bounds_max;
-    let mut issues = Vec::new();
-    if bmax.x > env.x { issues.push(format!("X MAX {:.1} > {:.1}", bmax.x, env.x)); }
-    if bmax.y > env.y { issues.push(format!("Y MAX {:.1} > {:.1}", bmax.y, env.y)); }
-    if bmin.z < -env.z { issues.push(format!("Z MIN {:.1} < {:.1}", bmin.z, -env.z)); }
-    if bmin.x < 0.0 { issues.push(format!("X MIN {:.1} < 0", bmin.x)); }
-    if bmin.y < 0.0 { issues.push(format!("Y MIN {:.1} < 0", bmin.y)); }
-    if bmax.z > env.z { issues.push(format!("Z MAX {:.1} > {:.1}", bmax.z, env.z)); }
-    if issues.is_empty() {
-        String::new()
-    } else {
-        format!("!! OUT OF BOUNDS: {}", issues.join(" | "))
-    }
 }

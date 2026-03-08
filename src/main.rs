@@ -100,11 +100,13 @@ fn main() {
     );
 
     let mut gui = three_d::GUI::new(&context);
-    let mut scene = Scene::new(&context, &CUBIKO);
+    let mut scene = Scene::new(&context);
 
     let mut controls_state = ui::controls::ControlsState::default();
     let mut editor_state = ui::editor::EditorState::default();
     let mut console_state = ui::console::ConsoleState::default();
+    let mut material_state = ui::scene::MaterialState::default();
+    let mut material_version: u32 = 0;
     let mut theme_set = false;
 
     #[derive(Clone, Copy, PartialEq)]
@@ -205,14 +207,14 @@ fn main() {
                         theme_set = true;
                     }
 
-                    ui::controls::draw(ctx, &engine, &mstate, &jstate, &mut controls_state);
+                    ui::controls::draw(ctx, &engine, &mstate, &jstate, &mut controls_state, &mut material_state, &mut material_version);
 
                     egui::TopBottomPanel::bottom("bottom_panels")
                         .resizable(true)
                         .default_height(250.0)
                         .show(ctx, |ui| {
                             ui.columns(2, |cols| {
-                                ui::editor::draw(&mut cols[0], &engine, &mstate, &jstate, &job, &mut editor_state, &CUBIKO);
+                                ui::editor::draw(&mut cols[0], &engine, &mstate, &jstate, &job, &mut editor_state, &mut material_state, &mut material_version);
                                 ui::console::draw(&mut cols[1], &engine, &log, &mut console_state);
                             });
                         });
@@ -244,7 +246,7 @@ fn main() {
             } else {
                 mstate.wpos
             };
-            scene.update(&context, tool_pos, &jstate, &CUBIKO);
+            scene.update(&context, tool_pos, &mstate, &jstate, &material_state, material_version);
 
             let objects = scene.collect();
             frame_input
@@ -270,7 +272,7 @@ fn main() {
                     *control_flow = ControlFlow::Exit;
                 }
                 winit::event::WindowEvent::DroppedFile(path) => {
-                    ui::editor::load_file(path, &job, &CUBIKO);
+                    ui::editor::load_file(path, &job);
                     let size = winit_window.inner_size();
                     #[allow(deprecated)]
                     let fake = winit::event::WindowEvent::CursorMoved {
