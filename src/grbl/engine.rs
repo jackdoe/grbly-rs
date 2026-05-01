@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex, RwLock};
 
+use crate::gcode::words::{strip_comments, strip_words};
+
 use super::parser::{parse_response, Response, ResponseType};
 use super::serial::Serial;
 use super::state::*;
@@ -81,12 +83,13 @@ struct SendPipe {
     queue: Mutex<SendQueue>,
     buf_ready: Condvar,
     write_port: Mutex<Option<Box<dyn serialport::SerialPort + Send>>>,
+    state: Arc<RwLock<MachineState>>,
     on_log: OnLog,
     file_log: Mutex<std::fs::File>,
 }
 
 impl SendPipe {
-    fn new() -> Self {
+    fn new(state: Arc<RwLock<MachineState>>) -> Self {
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -97,6 +100,7 @@ impl SendPipe {
             queue: Mutex::new(SendQueue::new(128)),
             buf_ready: Condvar::new(),
             write_port: Mutex::new(None),
+            state,
             on_log: Arc::new(Mutex::new(None)),
             file_log: Mutex::new(file),
         }
@@ -104,7 +108,7 @@ impl SendPipe {
 
     /// Enqueue a line and flush what fits to serial. Non-blocking.
     fn send(&self, line: &str) {
-        let line = strip_gcode_comments(line);
+        let line = strip_comments(line);
         if line.is_empty() {
             return;
         }
@@ -128,43 +132,79 @@ impl SendPipe {
         self.write_to_serial(&to_send);
     }
 
-    /// Block until the queue has space for `line`, enqueue it, flush. Used by job streamer.
-    fn send_blocking(&self, line: &str, cancel: &dyn Fn() -> bool) -> bool {
-        let line = strip_gcode_comments(line);
+    /// Block until the job may enqueue `line`, then flush. Used by the job streamer.
+    fn send_job_line(
+        &self,
+        line: &str,
+        should_stop: &dyn Fn() -> bool,
+        is_paused: &dyn Fn() -> bool,
+    ) -> bool {
+        let line = strip_comments(line);
         if line.is_empty() {
             return true;
         }
-        let to_send = {
-            let mut q = self.queue.lock();
-            while !q.has_space_for(line.len()) {
-                if cancel() {
-                    return false;
-                }
-                self.buf_ready.wait(&mut q);
+
+        loop {
+            if should_stop() {
+                return false;
             }
-            q.enqueue(line);
-            q.flush()
-        };
-        self.write_to_serial(&to_send);
-        true
+            if is_paused() {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+
+            let to_send = {
+                let mut q = self.queue.lock();
+                while !q.has_space_for(line.len()) {
+                    if should_stop() {
+                        return false;
+                    }
+                    if is_paused() {
+                        break;
+                    }
+                    self.buf_ready.wait_for(&mut q, Duration::from_millis(50));
+                }
+                if !q.has_space_for(line.len()) {
+                    continue;
+                }
+                q.enqueue(line);
+                q.flush()
+            };
+            self.write_to_serial(&to_send);
+            return true;
+        }
     }
 
     /// Block until all in-flight commands are ack'd.
-    fn wait_idle(&self, cancel: &dyn Fn() -> bool) {
+    fn wait_job_idle(&self, should_stop: &dyn Fn() -> bool, is_paused: &dyn Fn() -> bool) -> bool {
         let mut q = self.queue.lock();
         while !q.is_idle() {
-            if cancel() {
-                return;
+            if should_stop() {
+                return false;
             }
-            self.buf_ready.wait(&mut q);
+            if is_paused() {
+                drop(q);
+                std::thread::sleep(Duration::from_millis(50));
+                q = self.queue.lock();
+                continue;
+            }
+            self.buf_ready.wait_for(&mut q, Duration::from_millis(50));
         }
+        true
     }
 
     /// Send a realtime character (not queued, bypasses buffer).
     fn realtime(&self, b: u8) {
-        let mut wp = self.write_port.lock();
-        if let Some(ref mut port) = *wp {
-            let _ = port.write_all(&[b]);
+        let err = {
+            let mut wp = self.write_port.lock();
+            if let Some(ref mut port) = *wp {
+                port.write_all(&[b]).err()
+            } else {
+                None
+            }
+        };
+        if let Some(err) = err {
+            self.serial_error(format!("serial realtime write failed: {err}"));
         }
     }
 
@@ -172,6 +212,16 @@ impl SendPipe {
         let mut q = self.queue.lock();
         q.clear();
         self.buf_ready.notify_all();
+    }
+
+    fn serial_error(&self, msg: String) {
+        self.log(format!("!! {msg}"));
+        *self.write_port.lock() = None;
+        self.clear();
+        let mut s = self.state.write();
+        s.connected = false;
+        s.status = Status::Disconnected;
+        s.last_error = msg;
     }
 
     fn log(&self, msg: String) {
@@ -189,15 +239,24 @@ impl SendPipe {
         if lines.is_empty() {
             return;
         }
+
+        let mut err = None;
         {
             let mut wp = self.write_port.lock();
             if let Some(ref mut port) = *wp {
                 for line in lines {
-                    let _ = port.write_all(line.as_bytes());
-                    let _ = port.write_all(b"\n");
+                    if let Err(e) = port.write_all(line.as_bytes()) {
+                        err = Some(format!("serial write failed for `{line}`: {e}"));
+                        break;
+                    }
+                    if let Err(e) = port.write_all(b"\n") {
+                        err = Some(format!("serial newline write failed for `{line}`: {e}"));
+                        break;
+                    }
                 }
             }
         }
+
         {
             let mut f = self.file_log.lock();
             for line in lines {
@@ -208,6 +267,10 @@ impl SendPipe {
             for line in lines {
                 cb(format!("> {}", line));
             }
+        }
+
+        if let Some(err) = err {
+            self.serial_error(err);
         }
     }
 }
@@ -222,9 +285,9 @@ pub struct Engine {
 impl Engine {
     pub fn new(state: Arc<RwLock<MachineState>>, job: Arc<RwLock<JobState>>) -> Self {
         Self {
-            state,
+            state: state.clone(),
             job,
-            pipe: Arc::new(SendPipe::new()),
+            pipe: Arc::new(SendPipe::new(state)),
             stop_flag: Mutex::new(None),
         }
     }
@@ -234,7 +297,17 @@ impl Engine {
     }
 
     pub fn connect(&self, port: &str, baud: u32) -> std::io::Result<()> {
-        let serial = Serial::open(port, baud)?;
+        if let Some(stop) = self.stop_flag.lock().take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+
+        let serial = match Serial::open(port, baud) {
+            Ok(serial) => serial,
+            Err(err) => {
+                self.state.write().last_error = format!("failed to connect to {port}: {err}");
+                return Err(err);
+            }
+        };
         let (write_port, reader) = serial.into_parts();
 
         *self.pipe.write_port.lock() = Some(write_port);
@@ -245,6 +318,7 @@ impl Engine {
             s.port = port.to_string();
             s.baud = baud;
             s.connected = true;
+            s.last_error.clear();
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -264,7 +338,6 @@ impl Engine {
             std::thread::spawn(move || poll_loop(stop, pipe));
         }
 
-        // Just read current settings, don't overwrite them
         self.send("$$");
 
         Ok(())
@@ -302,10 +375,12 @@ impl Engine {
 
     pub fn start_job(self: &Arc<Self>) {
         {
+            let machine = self.state.read().clone();
             let mut j = self.job.write();
-            if j.status == JobStatus::Running {
+            if matches!(j.status, JobStatus::Running | JobStatus::Paused) {
                 return;
             }
+            recompute_soft_limit_violations(&mut j, &machine);
             j.status = JobStatus::Running;
             j.current_line = 0;
         }
@@ -314,13 +389,21 @@ impl Engine {
     }
 
     pub fn pause_job(&self) {
-        self.job.write().status = JobStatus::Paused;
-        self.feed_hold();
+        let mut j = self.job.write();
+        if j.status == JobStatus::Running {
+            j.status = JobStatus::Paused;
+            drop(j);
+            self.feed_hold();
+        }
     }
 
     pub fn resume_job(&self) {
-        self.job.write().status = JobStatus::Running;
-        self.resume();
+        let mut j = self.job.write();
+        if j.status == JobStatus::Paused {
+            j.status = JobStatus::Running;
+            drop(j);
+            self.resume();
+        }
     }
 
     pub fn stop_job(&self) {
@@ -329,6 +412,9 @@ impl Engine {
     }
 
     pub fn step_line(&self) {
+        if self.job.read().status == JobStatus::Running {
+            return;
+        }
         loop {
             let mut j = self.job.write();
             if j.current_line >= j.lines.len() {
@@ -344,9 +430,9 @@ impl Engine {
             let z_locked = j.z_locked;
             j.current_line += 1;
             drop(j);
-            let mut stripped = strip_gcode_comments(&line).trim().to_string();
+            let mut stripped = strip_comments(&line).trim().to_string();
             if z_locked {
-                stripped = strip_z_words(&stripped);
+                stripped = strip_words(&stripped, b"Z");
             }
             if !stripped.is_empty() {
                 self.pipe.send(&stripped);
@@ -368,11 +454,23 @@ impl Engine {
         let violated_lines = j.violated_lines.clone();
         drop(j);
 
-        let cancel = || self.job.read().status != JobStatus::Running;
+        let should_stop = || {
+            matches!(
+                self.job.read().status,
+                JobStatus::Idle | JobStatus::Complete
+            )
+        };
+        let is_paused = || self.job.read().status == JobStatus::Paused;
 
         for (i, line) in lines.iter().enumerate() {
-            if cancel() {
+            if should_stop() {
                 return;
+            }
+            while is_paused() {
+                std::thread::sleep(Duration::from_millis(50));
+                if should_stop() {
+                    return;
+                }
             }
             if i < violated_lines.len() && violated_lines[i] {
                 self.pipe
@@ -380,22 +478,20 @@ impl Engine {
                 self.job.write().status = JobStatus::Idle;
                 return;
             }
-            let mut stripped = strip_gcode_comments(line).trim().to_string();
+            let mut stripped = strip_comments(line).trim().to_string();
             if z_locked {
-                stripped = strip_z_words(&stripped);
+                stripped = strip_words(&stripped, b"Z");
             }
             if stripped.is_empty() {
                 self.job.write().current_line = i + 1;
                 continue;
             }
-            if !self.pipe.send_blocking(&stripped, &cancel) {
+            if !self.pipe.send_job_line(&stripped, &should_stop, &is_paused) {
                 return;
             }
             self.job.write().current_line = i + 1;
         }
-
-        self.pipe.wait_idle(&cancel);
-        if !cancel() {
+        if self.pipe.wait_job_idle(&should_stop, &is_paused) && !should_stop() {
             self.job.write().status = JobStatus::Complete;
         }
     }
@@ -415,7 +511,10 @@ fn read_loop(
         }
         buf.clear();
         match reader.read_line(&mut buf) {
-            Ok(0) => return,
+            Ok(0) => {
+                pipe.serial_error("serial reader closed".into());
+                return;
+            }
             Ok(_) => {
                 let line = buf.trim().to_string();
                 if line.is_empty() {
@@ -426,7 +525,10 @@ fn read_loop(
                 pipe.log(line);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
-            Err(_) => return,
+            Err(err) => {
+                pipe.serial_error(format!("serial read failed: {err}"));
+                return;
+            }
         }
     }
 }
@@ -507,44 +609,6 @@ fn apply_response(
     }
 }
 
-fn strip_z_words(line: &str) -> String {
-    let bytes = line.as_bytes();
-    let mut out = String::with_capacity(line.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'Z' || bytes[i] == b'z' {
-            i += 1;
-            while i < bytes.len()
-                && (bytes[i] == b'-' || bytes[i] == b'.' || (bytes[i] >= b'0' && bytes[i] <= b'9'))
-            {
-                i += 1;
-            }
-            while i < bytes.len() && bytes[i] == b' ' {
-                i += 1;
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out.trim().to_string()
-}
-
-fn strip_gcode_comments(line: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0i32;
-    for c in line.chars() {
-        match c {
-            '(' => depth += 1,
-            ')' if depth > 0 => depth -= 1,
-            ';' => return out.trim().to_string(),
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out.trim().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,7 +641,7 @@ mod tests {
 
     #[test]
     fn strip_comments_dollar() {
-        assert_eq!(strip_gcode_comments("$$"), "$$");
-        assert_eq!(strip_gcode_comments("$20=0"), "$20=0");
+        assert_eq!(strip_comments("$$"), "$$");
+        assert_eq!(strip_comments("$20=0"), "$20=0");
     }
 }

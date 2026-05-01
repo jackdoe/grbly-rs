@@ -55,6 +55,17 @@ pub struct Scene {
     last_wco: V3,
     last_max_travel: V3,
     last_material_version: u32,
+    last_show_heatmap: bool,
+}
+
+pub struct SceneUpdate<'a> {
+    pub context: &'a Context,
+    pub tool_pos: V3,
+    pub mstate: &'a MachineState,
+    pub jstate: &'a JobState,
+    pub material: &'a MaterialState,
+    pub material_version: u32,
+    pub show_heatmap: bool,
 }
 
 const LINE_W: f32 = 0.3;
@@ -89,18 +100,21 @@ impl Scene {
             last_wco: V3::default(),
             last_max_travel: V3::default(),
             last_material_version: u32::MAX,
+            last_show_heatmap: true,
         }
     }
 
-    pub fn update(
-        &mut self,
-        context: &Context,
-        tool_pos: V3,
-        mstate: &MachineState,
-        jstate: &JobState,
-        material: &MaterialState,
-        material_version: u32,
-    ) {
+    pub fn update(&mut self, args: SceneUpdate<'_>) {
+        let SceneUpdate {
+            context,
+            tool_pos,
+            mstate,
+            jstate,
+            material,
+            material_version,
+            show_heatmap,
+        } = args;
+
         let wpos = tool_pos;
         if wpos != self.last_pos {
             self.trail_points.push(wpos);
@@ -122,15 +136,18 @@ impl Scene {
             self.trail_dirty = false;
         }
 
-        if jstate.version != self.last_version {
+        if jstate.version != self.last_version || show_heatmap != self.last_show_heatmap {
             self.last_version = jstate.version;
+            self.last_show_heatmap = show_heatmap;
             if !jstate.segments.is_empty() {
                 self.toolpath = Some(build_toolpath(
                     context,
                     &jstate.segments,
                     &jstate.seg_violations,
+                    &jstate.seg_pass_counts,
                     jstate.bounds_min,
                     jstate.bounds_max,
+                    show_heatmap,
                 ));
                 self.bounds_box = Some(build_wire_box(
                     context,
@@ -711,14 +728,19 @@ fn build_toolpath(
     context: &Context,
     segments: &[Segment],
     seg_violations: &[bool],
+    seg_pass_counts: &[u16],
     bmin: V3,
     bmax: V3,
+    show_heatmap: bool,
 ) -> Gm<Mesh, ColorMaterial> {
     let mut lb = LineBuilder::new();
     for (i, seg) in segments.iter().enumerate() {
         let violated = seg_violations.get(i).copied().unwrap_or(false);
+        let pass_count = seg_pass_counts.get(i).copied().unwrap_or(1);
         let color = if violated {
             Srgba::new(0xff, 0x22, 0x22, 0xff)
+        } else if show_heatmap && pass_count > 1 {
+            heatmap_color(pass_count)
         } else if seg.rapid {
             Srgba::new(0xff, 0x88, 0x00, 0xff)
         } else {
@@ -726,6 +748,8 @@ fn build_toolpath(
         };
         let w = if violated {
             THICK_W
+        } else if show_heatmap && pass_count > 1 {
+            (LINE_W + (pass_count as f32 - 1.0) * 0.08).min(THICK_W * 1.8)
         } else if seg.rapid {
             GRID_W
         } else {
@@ -734,6 +758,16 @@ fn build_toolpath(
         lb.add(seg.start, seg.end, color, w);
     }
     lb.build(context)
+}
+
+fn heatmap_color(pass_count: u16) -> Srgba {
+    match pass_count {
+        0 | 1 => Srgba::new(0x00, 0xff, 0x88, 0xff),
+        2 => Srgba::new(0xff, 0xdd, 0x33, 0xff),
+        3 => Srgba::new(0xff, 0x99, 0x22, 0xff),
+        4 => Srgba::new(0xff, 0x55, 0x22, 0xff),
+        _ => Srgba::new(0xff, 0x22, 0x66, 0xff),
+    }
 }
 
 fn build_gantry(context: &Context, wpos: V3, z_top: f32) -> Gm<Mesh, ColorMaterial> {

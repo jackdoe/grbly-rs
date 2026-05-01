@@ -1,9 +1,5 @@
+use crate::gcode::words::parse_words;
 use crate::grbl::state::{Segment, Vec3};
-
-struct Word {
-    letter: u8,
-    value: f64,
-}
 
 struct Parser {
     pos: Vec3,
@@ -64,64 +60,12 @@ pub fn parse_with_bounds(lines: &[String]) -> (Vec<Segment>, Vec3, Vec3) {
     (segs, bmin, bmax)
 }
 
-fn strip_comments(line: &str) -> String {
-    let line = if let Some(idx) = line.find(';') {
-        &line[..idx]
-    } else {
-        line
-    };
-    let mut out = String::new();
-    let mut depth = 0i32;
-    for c in line.chars() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-            }
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out.trim().to_string()
-}
-
-fn parse_words(s: &str) -> Vec<Word> {
-    let s = s.trim();
-    let bytes = s.as_bytes();
-    let mut words = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b' ' || bytes[i] == b'\t' {
-            i += 1;
-            continue;
-        }
-        let b = bytes[i];
-        let is_alpha = b.is_ascii_alphabetic();
-        if !is_alpha {
-            i += 1;
-            continue;
-        }
-        let letter = b & 0xDF;
-        i += 1;
-        let j = i;
-        while i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'.' || bytes[i].is_ascii_digit())
-        {
-            i += 1;
-        }
-        let val: f64 = s[j..i].parse().unwrap_or(0.0);
-        words.push(Word { letter, value: val });
-    }
-    words
-}
-
 impl Parser {
     fn parse_line(&mut self, raw: &str, line_num: usize) -> Vec<Segment> {
-        let clean = strip_comments(raw);
-        if clean.is_empty() {
+        let words = parse_words(raw);
+        if words.is_empty() {
             return Vec::new();
         }
-
-        let words = parse_words(&clean);
 
         let mut has_motion = false;
         let mut x = 0.0f64;
@@ -129,8 +73,10 @@ impl Parser {
         let mut z = 0.0f64;
         let mut ii = 0.0f64;
         let mut jj = 0.0f64;
+        let mut rr = 0.0f64;
         let (mut got_x, mut got_y, mut got_z) = (false, false, false);
         let (mut got_i, mut got_j) = (false, false);
+        let mut got_r = false;
 
         for w in &words {
             match w.letter {
@@ -188,6 +134,10 @@ impl Parser {
                     jj = w.value;
                     got_j = true;
                 }
+                b'R' => {
+                    rr = w.value;
+                    got_r = true;
+                }
                 b'F' => {}
                 _ => {}
             }
@@ -198,25 +148,26 @@ impl Parser {
         }
 
         let mut target = self.pos;
+        let unit = if self.metric { 1.0 } else { 25.4 };
         if self.absolute {
             if got_x {
-                target.x = x as f32;
+                target.x = (x * unit) as f32;
             }
             if got_y {
-                target.y = y as f32;
+                target.y = (y * unit) as f32;
             }
             if got_z {
-                target.z = z as f32;
+                target.z = (z * unit) as f32;
             }
         } else {
             if got_x {
-                target.x += x as f32;
+                target.x += (x * unit) as f32;
             }
             if got_y {
-                target.y += y as f32;
+                target.y += (y * unit) as f32;
             }
             if got_z {
-                target.z += z as f32;
+                target.z += (z * unit) as f32;
             }
         }
 
@@ -233,19 +184,64 @@ impl Parser {
             }
             2 | 3 => {
                 let mut center = self.pos;
-                if got_i {
-                    center.x += ii as f32;
+                let clockwise = self.motion == 2;
+                if got_r {
+                    center =
+                        arc_center_from_radius(self.pos, target, (rr * unit) as f32, clockwise);
+                } else {
+                    if got_i {
+                        center.x += (ii * unit) as f32;
+                    }
+                    if got_j {
+                        center.y += (jj * unit) as f32;
+                    }
                 }
-                if got_j {
-                    center.y += jj as f32;
-                }
-                let segs = tessellate_arc(self.pos, target, center, self.motion == 2, line_num);
+                let segs = tessellate_arc(self.pos, target, center, clockwise, line_num);
                 self.pos = target;
                 segs
             }
             _ => Vec::new(),
         }
     }
+}
+
+fn arc_center_from_radius(start: Vec3, end: Vec3, radius: f32, clockwise: bool) -> Vec3 {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let chord = (dx * dx + dy * dy).sqrt();
+    let r = radius.abs();
+    if chord < 0.0001 || r < chord * 0.5 {
+        return start;
+    }
+
+    let mx = (start.x + end.x) * 0.5;
+    let my = (start.y + end.y) * 0.5;
+    let h = (r * r - (chord * 0.5).powi(2)).sqrt();
+    let px = -dy / chord;
+    let py = dx / chord;
+    let candidates = [
+        Vec3 {
+            x: mx + px * h,
+            y: my + py * h,
+            z: start.z,
+        },
+        Vec3 {
+            x: mx - px * h,
+            y: my - py * h,
+            z: start.z,
+        },
+    ];
+    let wants_major = radius < 0.0;
+    candidates
+        .into_iter()
+        .min_by(|a, b| {
+            let da = arc_sweep(start, end, *a, clockwise).abs();
+            let db = arc_sweep(start, end, *b, clockwise).abs();
+            let sa = if wants_major { -da } else { da };
+            let sb = if wants_major { -db } else { db };
+            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(start)
 }
 
 fn tessellate_arc(
@@ -255,18 +251,10 @@ fn tessellate_arc(
     clockwise: bool,
     line: usize,
 ) -> Vec<Segment> {
+    let total_angle = arc_sweep(start, end, center, clockwise);
+
     let start_angle = ((start.y - center.y) as f64).atan2((start.x - center.x) as f64);
-    let mut end_angle = ((end.y - center.y) as f64).atan2((end.x - center.x) as f64);
 
-    if clockwise {
-        if end_angle >= start_angle {
-            end_angle -= 2.0 * std::f64::consts::PI;
-        }
-    } else if end_angle <= start_angle {
-        end_angle += 2.0 * std::f64::consts::PI;
-    }
-
-    let total_angle = end_angle - start_angle;
     let step_size = 2.0 * std::f64::consts::PI / 36.0;
     let steps = ((total_angle.abs() / step_size).max(1.0)) as usize;
     let radius =
@@ -291,6 +279,20 @@ fn tessellate_arc(
         prev = pt;
     }
     segs
+}
+
+fn arc_sweep(start: Vec3, end: Vec3, center: Vec3, clockwise: bool) -> f64 {
+    let start_angle = ((start.y - center.y) as f64).atan2((start.x - center.x) as f64);
+    let mut end_angle = ((end.y - center.y) as f64).atan2((end.x - center.x) as f64);
+    if clockwise {
+        if end_angle >= start_angle {
+            end_angle -= 2.0 * std::f64::consts::PI;
+        }
+    } else if end_angle <= start_angle {
+        end_angle += 2.0 * std::f64::consts::PI;
+    }
+
+    end_angle - start_angle
 }
 
 #[cfg(test)]
@@ -361,5 +363,21 @@ mod tests {
         assert_eq!(bmax.x, 50.0);
         assert_eq!(bmax.y, 30.0);
         assert_eq!(bmax.z, 0.0);
+    }
+
+    #[test]
+    fn inch_mode_scales_to_mm() {
+        let segs = parse(&lines(&["G20", "G0 X1 Y0.5"]));
+        assert_eq!(segs[0].end.x, 25.4);
+        assert_eq!(segs[0].end.y, 12.7);
+    }
+
+    #[test]
+    fn arc_with_radius_word() {
+        let segs = parse(&lines(&["G90 G21", "G0 X10 Y0", "G3 X0 Y10 R10"]));
+        assert!(segs.len() > 2);
+        let last = segs.last().unwrap();
+        assert!((last.end.x).abs() < 0.1);
+        assert!((last.end.y - 10.0).abs() < 0.1);
     }
 }

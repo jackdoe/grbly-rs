@@ -3,6 +3,7 @@ use crate::grbl::serial;
 use crate::grbl::state::*;
 use crate::ui::scene::MaterialState;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use three_d::egui;
 
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
@@ -12,15 +13,31 @@ const RED: egui::Color32 = egui::Color32::from_rgb(0xff, 0x44, 0x44);
 const WHITE: egui::Color32 = egui::Color32::from_rgb(0xff, 0xdd, 0xaa);
 const BTN_BG: egui::Color32 = egui::Color32::from_rgb(0x22, 0x22, 0x33);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ControlsTab {
+    #[default]
+    Run,
+    Jog,
+    Setup,
+    Material,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfirmAction {
+    SoftLimitEnable,
+    SoftLimitDisable,
+    SpindleOn,
+}
+
 pub struct ControlsState {
     pub port_list: Vec<String>,
     pub port_index: usize,
     pub jog_step: f32,
-    pub travel_x: String,
-    pub travel_y: String,
-    pub travel_z: String,
+    travel: Vec3,
     last_max_travel: Vec3,
-    soft_limit_warning: String,
+    tab: ControlsTab,
+    confirm: Option<(ConfirmAction, Instant)>,
+    notice: String,
 }
 
 impl Default for ControlsState {
@@ -29,11 +46,11 @@ impl Default for ControlsState {
             port_list: Vec::new(),
             port_index: 0,
             jog_step: 1.0,
-            travel_x: String::new(),
-            travel_y: String::new(),
-            travel_z: String::new(),
+            travel: Vec3::default(),
             last_max_travel: Vec3::default(),
-            soft_limit_warning: String::new(),
+            tab: ControlsTab::Run,
+            confirm: None,
+            notice: String::new(),
         }
     }
 }
@@ -66,25 +83,26 @@ pub fn draw(
     material: &mut MaterialState,
     material_version: &mut u32,
 ) {
+    expire_confirm(ui_state);
     egui::SidePanel::left("controls")
-        .default_width(280.0)
+        .default_width(292.0)
         .resizable(false)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 connection_section(ui, engine, mstate, ui_state);
                 ui.separator();
-                status_section(ui, engine, mstate, ui_state);
+                machine_readout(ui, mstate);
+                draw_notice(ui, ui_state);
                 ui.separator();
-                jog_section(ui, engine, ui_state);
+                tab_bar(ui, ui_state);
                 ui.separator();
-                overrides_section(ui, engine, mstate);
-                ui.separator();
-                actions_section(ui, engine);
-                ui.separator();
-                material_section(ui, material, material_version);
-                ui.separator();
-                job_section(ui, engine, jstate);
+                match ui_state.tab {
+                    ControlsTab::Run => run_section(ui, engine, mstate, jstate, ui_state),
+                    ControlsTab::Jog => jog_section(ui, engine, mstate, ui_state),
+                    ControlsTab::Setup => setup_section(ui, engine, mstate, ui_state),
+                    ControlsTab::Material => material_section(ui, material, material_version),
+                }
             });
         });
 }
@@ -130,16 +148,21 @@ fn connection_section(
             {
                 engine.disconnect();
                 state.last_max_travel = Vec3::default();
+                state.notice.clear();
             }
         } else if cols[1]
-            .add_sized(
-                [cols[1].available_width(), 28.0],
+            .add_enabled(
+                !state.port_list.is_empty(),
                 wide_btn_colored("CONNECT", egui::Color32::from_rgb(0x00, 0x66, 0x33)),
             )
             .clicked()
         {
             if let Some(port) = state.port_list.get(state.port_index) {
-                let _ = engine.connect(port, 115200);
+                if let Err(err) = engine.connect(port, 115200) {
+                    state.notice = format!("Connect failed: {err}");
+                } else {
+                    state.notice.clear();
+                }
                 state.last_max_travel = Vec3::default();
             }
         }
@@ -156,13 +179,7 @@ fn connection_section(
     });
 }
 
-fn status_section(
-    ui: &mut egui::Ui,
-    engine: &Arc<Engine>,
-    mstate: &MachineState,
-    state: &mut ControlsState,
-) {
-    section(ui, "Status");
+fn machine_readout(ui: &mut egui::Ui, mstate: &MachineState) {
     let (color, text) = status_display(mstate.status);
     ui.label(
         egui::RichText::new(format!("[ {} ]", text))
@@ -170,142 +187,95 @@ fn status_section(
             .color(color)
             .strong(),
     );
-
     ui.add_space(4.0);
     ui.label(egui::RichText::new("WORK").size(11.0).color(DIM));
     position_row(ui, mstate.wpos, 18.0);
-
     ui.add_space(2.0);
     ui.label(egui::RichText::new("MACHINE").size(11.0).color(DIM));
     position_row(ui, mstate.mpos, 13.0);
-
-    ui.add_space(4.0);
-    let mt = mstate.max_travel;
-    if mt.x > 0.0 {
+    if mstate.max_travel.x > 0.0 {
         ui.label(
             egui::RichText::new(format!(
                 "TRAVEL  X:{:.1}  Y:{:.1}  Z:{:.1}",
-                mt.x, mt.y, mt.z
+                mstate.max_travel.x, mstate.max_travel.y, mstate.max_travel.z
             ))
             .size(11.0)
             .color(DIM),
         );
     }
-    if mstate.connected {
-        ui.horizontal(|ui| {
-            let (sl_color, sl_text) = if mstate.soft_limits {
-                (GREEN, "SOFT LIMITS: ON")
-            } else {
-                (RED, "SOFT LIMITS: OFF")
-            };
-            ui.label(egui::RichText::new(sl_text).size(12.0).color(sl_color));
-            let toggle_text = if mstate.soft_limits {
-                "DISABLE"
-            } else {
-                "ENABLE"
-            };
-            let toggle_fill = if mstate.soft_limits {
-                egui::Color32::from_rgb(0x33, 0x11, 0x11)
-            } else {
-                egui::Color32::from_rgb(0x11, 0x33, 0x11)
-            };
-            let btn = egui::Button::new(egui::RichText::new(toggle_text).size(11.0))
-                .fill(toggle_fill)
-                .min_size(egui::vec2(0.0, 20.0));
-            if ui.add(btn).clicked() {
-                if mstate.soft_limits {
-                    // Disabling soft limits always works
-                    if mstate.status == Status::Alarm || mstate.status == Status::Door {
-                        engine.send("$X");
-                    }
-                    engine.send("$20=0");
-                    engine.send("$$");
-                    state.soft_limit_warning = String::new();
-                } else {
-                    // Enabling soft limits requires all travel axes to be non-zero
-                    let has_zero = mt.x == 0.0 || mt.y == 0.0 || mt.z == 0.0;
-                    if has_zero {
-                        let mut zero_axes = Vec::new();
-                        if mt.x == 0.0 {
-                            zero_axes.push("X ($130)");
-                        }
-                        if mt.y == 0.0 {
-                            zero_axes.push("Y ($131)");
-                        }
-                        if mt.z == 0.0 {
-                            zero_axes.push("Z ($132)");
-                        }
-                        state.soft_limit_warning = format!(
-                            "Cannot enable soft limits: {} travel is 0. Set travel values first.",
-                            zero_axes.join(", ")
-                        );
-                    } else {
-                        if mstate.status == Status::Alarm || mstate.status == Status::Door {
-                            engine.send("$X");
-                        }
-                        engine.send("$20=1");
-                        engine.send("$$");
-                        state.soft_limit_warning = String::new();
-                    }
-                }
-            }
-        });
+    if !mstate.last_error.is_empty() {
+        banner(ui, &mstate.last_error, RED);
+    }
+}
 
-        // Show soft limit warning if any
-        if !state.soft_limit_warning.is_empty() {
-            ui.label(
-                egui::RichText::new(&state.soft_limit_warning)
-                    .size(11.0)
-                    .color(AMBER),
-            );
-        }
-
-        // Re-sync text fields whenever max_travel changes
-        if mt != state.last_max_travel {
-            state.last_max_travel = mt;
-            state.travel_x = format!("{:.1}", mt.x);
-            state.travel_y = format!("{:.1}", mt.y);
-            state.travel_z = format!("{:.1}", mt.z);
-        }
-
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("TRAVEL").size(11.0).color(DIM));
-            let w = 38.0;
-            ui.label(egui::RichText::new("X").size(11.0).color(DIM));
-            ui.add(
-                egui::TextEdit::singleline(&mut state.travel_x)
-                    .desired_width(w)
-                    .font(egui::TextStyle::Monospace),
-            );
-            ui.label(egui::RichText::new("Y").size(11.0).color(DIM));
-            ui.add(
-                egui::TextEdit::singleline(&mut state.travel_y)
-                    .desired_width(w)
-                    .font(egui::TextStyle::Monospace),
-            );
-            ui.label(egui::RichText::new("Z").size(11.0).color(DIM));
-            ui.add(
-                egui::TextEdit::singleline(&mut state.travel_z)
-                    .desired_width(w)
-                    .font(egui::TextStyle::Monospace),
-            );
+fn tab_bar(ui: &mut egui::Ui, state: &mut ControlsState) {
+    ui.horizontal(|ui| {
+        for (label, tab) in [
+            ("RUN", ControlsTab::Run),
+            ("JOG", ControlsTab::Jog),
+            ("SETUP", ControlsTab::Setup),
+            ("MAT", ControlsTab::Material),
+        ] {
             if ui
-                .add(
-                    egui::Button::new(egui::RichText::new("SET").size(11.0))
-                        .min_size(egui::vec2(0.0, 20.0)),
-                )
+                .selectable_label(state.tab == tab, egui::RichText::new(label).size(12.0))
                 .clicked()
             {
-                let x: f32 = state.travel_x.trim().parse().unwrap_or(mt.x);
-                let y: f32 = state.travel_y.trim().parse().unwrap_or(mt.y);
-                let z: f32 = state.travel_z.trim().parse().unwrap_or(mt.z);
-                engine.send(&format!("$130={:.1}", x));
-                engine.send(&format!("$131={:.1}", y));
-                engine.send(&format!("$132={:.1}", z));
-                engine.send("$$");
+                state.tab = tab;
             }
-        });
+        }
+    });
+}
+
+fn draw_notice(ui: &mut egui::Ui, state: &ControlsState) {
+    if !state.notice.is_empty() {
+        banner(ui, &state.notice, AMBER);
     }
+    if let Some((action, _)) = state.confirm {
+        let text = match action {
+            ConfirmAction::SoftLimitEnable => "Confirm: click ENABLE again",
+            ConfirmAction::SoftLimitDisable => "Confirm: click DISABLE again",
+            ConfirmAction::SpindleOn => "Confirm: click SPINDLE ON again",
+        };
+        banner(ui, text, AMBER);
+    }
+}
+
+fn banner(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
+    let frame = egui::Frame::default()
+        .fill(egui::Color32::from_rgb(0x33, 0x22, 0x00))
+        .inner_margin(egui::Margin::same(4.0));
+    frame.show(ui, |ui| {
+        ui.label(egui::RichText::new(text).size(11.0).color(color));
+    });
+}
+
+fn run_section(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    mstate: &MachineState,
+    jstate: &JobState,
+    state: &mut ControlsState,
+) {
+    section(ui, "Job");
+    job_section(ui, engine, mstate, jstate);
+    ui.separator();
+    spindle_section(ui, engine, mstate, state);
+    ui.separator();
+    overrides_section(ui, engine, mstate);
+}
+
+fn setup_section(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    mstate: &MachineState,
+    state: &mut ControlsState,
+) {
+    section(ui, "Machine");
+    machine_actions(ui, engine, mstate);
+    ui.separator();
+    soft_limits(ui, engine, mstate, state);
+    ui.separator();
+    travel_editor(ui, engine, mstate, state);
 }
 
 fn position_row(ui: &mut egui::Ui, pos: Vec3, size: f32) {
@@ -326,8 +296,14 @@ fn position_row(ui: &mut egui::Ui, pos: Vec3, size: f32) {
     }
 }
 
-fn jog_section(ui: &mut egui::Ui, engine: &Arc<Engine>, state: &mut ControlsState) {
+fn jog_section(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    mstate: &MachineState,
+    state: &mut ControlsState,
+) {
     section(ui, "Jog");
+    let can_jog = can_jog(mstate);
     ui.columns(3, |cols| {
         for (i, step) in [0.1f32, 1.0, 10.0].iter().enumerate() {
             let selected = (state.jog_step - step).abs() < 0.01;
@@ -352,57 +328,74 @@ fn jog_section(ui: &mut egui::Ui, engine: &Arc<Engine>, state: &mut ControlsStat
     });
 
     let step = state.jog_step;
-    let jog_h = 32.0;
-
-    ui.columns(3, |cols| {
-        if cols[1]
-            .add_sized([cols[1].available_width(), jog_h], wide_btn("Y+"))
-            .clicked()
-        {
-            engine.send(&format!("$J=G91 G21 Y{:.3} F1000", step));
-        }
-    });
-    ui.columns(3, |cols| {
-        if cols[0]
-            .add_sized([cols[0].available_width(), jog_h], wide_btn("X-"))
-            .clicked()
-        {
-            engine.send(&format!("$J=G91 G21 X-{:.3} F1000", step));
-        }
-        if cols[2]
-            .add_sized([cols[2].available_width(), jog_h], wide_btn("X+"))
-            .clicked()
-        {
-            engine.send(&format!("$J=G91 G21 X{:.3} F1000", step));
-        }
-    });
-    ui.columns(3, |cols| {
-        if cols[1]
-            .add_sized([cols[1].available_width(), jog_h], wide_btn("Y-"))
-            .clicked()
-        {
-            engine.send(&format!("$J=G91 G21 Y-{:.3} F1000", step));
-        }
-    });
+    let jog_h = 34.0;
+    jog_button_row(
+        ui,
+        engine,
+        can_jog,
+        jog_h,
+        &[("", ""), ("Y+", "Y"), ("", "")],
+        step,
+    );
+    jog_button_row(
+        ui,
+        engine,
+        can_jog,
+        jog_h,
+        &[("X-", "X-"), ("", ""), ("X+", "X")],
+        step,
+    );
+    jog_button_row(
+        ui,
+        engine,
+        can_jog,
+        jog_h,
+        &[("", ""), ("Y-", "Y-"), ("", "")],
+        step,
+    );
     ui.add_space(4.0);
     ui.columns(2, |cols| {
-        if cols[0]
-            .add_sized([cols[0].available_width(), jog_h], wide_btn("Z-"))
-            .clicked()
-        {
+        if cols[0].add_enabled(can_jog, wide_btn("Z-")).clicked() {
             engine.send(&format!("$J=G91 G21 Z-{:.3} F500", step));
         }
-        if cols[1]
-            .add_sized([cols[1].available_width(), jog_h], wide_btn("Z+"))
-            .clicked()
-        {
+        if cols[1].add_enabled(can_jog, wide_btn("Z+")).clicked() {
             engine.send(&format!("$J=G91 G21 Z{:.3} F500", step));
+        }
+    });
+    if !can_jog {
+        ui.label(
+            egui::RichText::new("Jog is enabled only while connected and idle/jogging.")
+                .size(11.0)
+                .color(DIM),
+        );
+    }
+}
+
+fn jog_button_row(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    enabled: bool,
+    height: f32,
+    labels: &[(&str, &str); 3],
+    step: f32,
+) {
+    ui.columns(3, |cols| {
+        for (idx, (label, axis)) in labels.iter().enumerate() {
+            if label.is_empty() {
+                continue;
+            }
+            if cols[idx].add_enabled(enabled, wide_btn(label)).clicked() {
+                let feed = if axis.starts_with('Z') { 500 } else { 1000 };
+                engine.send(&format!("$J=G91 G21 {}{:.3} F{}", axis, step, feed));
+            }
+            cols[idx].allocate_space(egui::vec2(cols[idx].available_width(), height - 28.0));
         }
     });
 }
 
 fn overrides_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState) {
     section(ui, "Overrides");
+    let enabled = mstate.connected;
     let feed_ovr = if mstate.feed_ovr == 0 {
         100
     } else {
@@ -413,16 +406,25 @@ fn overrides_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineSt
     } else {
         mstate.spindle_ovr
     };
-    override_row(ui, engine, "FEED", feed_ovr, 0x91, 0x92);
-    override_row(ui, engine, "SPINDLE", spindle_ovr, 0x9A, 0x9B);
+    override_row(ui, engine, enabled, "FEED", feed_ovr, 0x91, 0x92);
+    override_row(ui, engine, enabled, "SPINDLE", spindle_ovr, 0x9A, 0x9B);
 }
 
-fn override_row(ui: &mut egui::Ui, engine: &Arc<Engine>, label: &str, pct: i32, inc: u8, dec: u8) {
+fn override_row(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    enabled: bool,
+    label: &str,
+    pct: i32,
+    inc: u8,
+    dec: u8,
+) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(label).size(13.0).color(DIM));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add(
+                .add_enabled(
+                    enabled,
                     egui::Button::new(egui::RichText::new("+").size(16.0))
                         .min_size(egui::vec2(28.0, 28.0)),
                 )
@@ -436,7 +438,8 @@ fn override_row(ui: &mut egui::Ui, engine: &Arc<Engine>, label: &str, pct: i32, 
                     .color(WHITE),
             );
             if ui
-                .add(
+                .add_enabled(
+                    enabled,
                     egui::Button::new(egui::RichText::new("-").size(16.0))
                         .min_size(egui::vec2(28.0, 28.0)),
                 )
@@ -448,149 +451,191 @@ fn override_row(ui: &mut egui::Ui, engine: &Arc<Engine>, label: &str, pct: i32, 
     });
 }
 
-fn actions_section(ui: &mut egui::Ui, engine: &Arc<Engine>) {
-    section(ui, "Actions");
+fn machine_actions(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState) {
+    let can_idle = mstate.connected && mstate.status == Status::Idle;
+    let can_home =
+        mstate.connected && !matches!(mstate.status, Status::Run | Status::Hold | Status::Jog);
     ui.columns(2, |cols| {
-        if cols[0]
-            .add_sized([cols[0].available_width(), 28.0], wide_btn("HOME"))
-            .clicked()
-        {
+        if cols[0].add_enabled(can_home, wide_btn("HOME")).clicked() {
             engine.send("$H");
         }
         if cols[1]
-            .add_sized([cols[1].available_width(), 28.0], wide_btn("UNLOCK"))
+            .add_enabled(mstate.connected, wide_btn("UNLOCK"))
             .clicked()
         {
             engine.send("$X");
         }
     });
     ui.columns(2, |cols| {
-        if cols[0]
-            .add_sized([cols[0].available_width(), 28.0], wide_btn("ZERO XY"))
-            .clicked()
-        {
+        if cols[0].add_enabled(can_idle, wide_btn("ZERO XY")).clicked() {
             engine.send("G10 L20 P1 X0 Y0");
         }
-        if cols[1]
-            .add_sized([cols[1].available_width(), 28.0], wide_btn("ZERO Z"))
-            .clicked()
-        {
+        if cols[1].add_enabled(can_idle, wide_btn("ZERO Z")).clicked() {
             engine.send("G10 L20 P1 Z0");
         }
     });
+}
+
+fn spindle_section(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    mstate: &MachineState,
+    state: &mut ControlsState,
+) {
+    section(ui, "Spindle");
+    let enabled = mstate.connected && matches!(mstate.status, Status::Idle | Status::Run);
     ui.columns(2, |cols| {
         let on_btn = egui::Button::new(egui::RichText::new("SPINDLE ON").size(14.0).color(GREEN))
             .fill(egui::Color32::from_rgb(0x11, 0x33, 0x11))
             .min_size(egui::vec2(0.0, 28.0));
-        if cols[0]
-            .add_sized([cols[0].available_width(), 28.0], on_btn)
-            .clicked()
+        if cols[0].add_enabled(enabled, on_btn).clicked()
+            && confirm(state, ConfirmAction::SpindleOn)
         {
             engine.send("M3 S1000");
+            state.notice.clear();
         }
         let off_btn = egui::Button::new(egui::RichText::new("SPINDLE OFF").size(14.0).color(RED))
             .fill(egui::Color32::from_rgb(0x33, 0x11, 0x11))
             .min_size(egui::vec2(0.0, 28.0));
-        if cols[1]
-            .add_sized([cols[1].available_width(), 28.0], off_btn)
-            .clicked()
-        {
+        if cols[1].add_enabled(mstate.connected, off_btn).clicked() {
+            state.confirm = None;
             engine.send("M5");
         }
     });
 }
 
-fn material_section(ui: &mut egui::Ui, material: &mut MaterialState, version: &mut u32) {
-    section(ui, "Material");
-    let changed = |mat: &mut MaterialState, ver: &mut u32| {
-        let w: f32 = mat.width_s.trim().parse().unwrap_or(mat.width);
-        let h: f32 = mat.height_s.trim().parse().unwrap_or(mat.height);
-        let t: f32 = mat.thickness_s.trim().parse().unwrap_or(mat.thickness);
-        let ox: f32 = mat.offset_x_s.trim().parse().unwrap_or(mat.offset_x);
-        let oy: f32 = mat.offset_y_s.trim().parse().unwrap_or(mat.offset_y);
-        if (w - mat.width).abs() > 0.001
-            || (h - mat.height).abs() > 0.001
-            || (t - mat.thickness).abs() > 0.001
-            || (ox - mat.offset_x).abs() > 0.001
-            || (oy - mat.offset_y).abs() > 0.001
-        {
-            mat.width = w;
-            mat.height = h;
-            mat.thickness = t;
-            mat.offset_x = ox;
-            mat.offset_y = oy;
-            *ver = ver.wrapping_add(1);
-        }
+fn soft_limits(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    mstate: &MachineState,
+    state: &mut ControlsState,
+) {
+    section(ui, "Soft Limits");
+    let mt = mstate.max_travel;
+    let (sl_color, sl_text) = if mstate.soft_limits {
+        (GREEN, "SOFT LIMITS: ON")
+    } else {
+        (RED, "SOFT LIMITS: OFF")
     };
-    let fw = ui.available_width() - 60.0;
-    let half = fw / 2.0;
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("W").size(12.0).color(DIM));
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut material.width_s)
-                    .desired_width(half)
-                    .font(egui::TextStyle::Monospace),
-            )
-            .changed()
-        {
-            changed(material, version);
+    ui.label(egui::RichText::new(sl_text).size(12.0).color(sl_color));
+    let has_travel = mt.x > 0.0 && mt.y > 0.0 && mt.z > 0.0;
+    let toggle_text = if mstate.soft_limits {
+        "DISABLE"
+    } else {
+        "ENABLE"
+    };
+    let toggle_fill = if mstate.soft_limits {
+        egui::Color32::from_rgb(0x33, 0x11, 0x11)
+    } else {
+        egui::Color32::from_rgb(0x11, 0x33, 0x11)
+    };
+    let action = if mstate.soft_limits {
+        ConfirmAction::SoftLimitDisable
+    } else {
+        ConfirmAction::SoftLimitEnable
+    };
+    if ui
+        .add_enabled(
+            mstate.connected && (mstate.soft_limits || has_travel),
+            egui::Button::new(egui::RichText::new(toggle_text).size(12.0))
+                .fill(toggle_fill)
+                .min_size(egui::vec2(ui.available_width(), 24.0)),
+        )
+        .clicked()
+        && confirm(state, action)
+    {
+        if matches!(mstate.status, Status::Alarm | Status::Door) {
+            engine.send("$X");
         }
-        ui.label(egui::RichText::new("H").size(12.0).color(DIM));
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut material.height_s)
-                    .desired_width(half)
-                    .font(egui::TextStyle::Monospace),
-            )
-            .changed()
-        {
-            changed(material, version);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("T").size(12.0).color(DIM));
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut material.thickness_s)
-                    .desired_width(half)
-                    .font(egui::TextStyle::Monospace),
-            )
-            .changed()
-        {
-            changed(material, version);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("X").size(12.0).color(DIM));
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut material.offset_x_s)
-                    .desired_width(half)
-                    .font(egui::TextStyle::Monospace),
-            )
-            .changed()
-        {
-            changed(material, version);
-        }
-        ui.label(egui::RichText::new("Y").size(12.0).color(DIM));
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut material.offset_y_s)
-                    .desired_width(half)
-                    .font(egui::TextStyle::Monospace),
-            )
-            .changed()
-        {
-            changed(material, version);
-        }
-    });
+        engine.send(if mstate.soft_limits { "$20=0" } else { "$20=1" });
+        engine.send("$$");
+        state.notice.clear();
+    }
+    if !mstate.soft_limits && !has_travel {
+        state.notice = "Set non-zero X/Y/Z travel before enabling soft limits.".into();
+    }
 }
 
-fn job_section(ui: &mut egui::Ui, engine: &Arc<Engine>, jstate: &JobState) {
-    section(ui, "Job");
+fn travel_editor(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    mstate: &MachineState,
+    state: &mut ControlsState,
+) {
+    section(ui, "Travel");
+    if mstate.max_travel != state.last_max_travel {
+        state.last_max_travel = mstate.max_travel;
+        state.travel = mstate.max_travel;
+    }
+    ui.horizontal(|ui| {
+        drag_mm(ui, "X", &mut state.travel.x);
+        drag_mm(ui, "Y", &mut state.travel.y);
+        drag_mm(ui, "Z", &mut state.travel.z);
+    });
+    if ui
+        .add_enabled(
+            mstate.connected
+                && state.travel.x > 0.0
+                && state.travel.y > 0.0
+                && state.travel.z > 0.0,
+            egui::Button::new(egui::RichText::new("SET TRAVEL").size(12.0))
+                .min_size(egui::vec2(ui.available_width(), 24.0)),
+        )
+        .clicked()
+    {
+        engine.send(&format!("$130={:.1}", state.travel.x));
+        engine.send(&format!("$131={:.1}", state.travel.y));
+        engine.send(&format!("$132={:.1}", state.travel.z));
+        engine.send("$$");
+        state.notice.clear();
+    }
+}
+
+fn material_section(ui: &mut egui::Ui, material: &mut MaterialState, version: &mut u32) {
+    section(ui, "Material");
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= drag_mm(ui, "W", &mut material.width).changed();
+        changed |= drag_mm(ui, "H", &mut material.height).changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= drag_mm(ui, "T", &mut material.thickness).changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= drag_mm(ui, "X", &mut material.offset_x).changed();
+        changed |= drag_mm(ui, "Y", &mut material.offset_y).changed();
+    });
+    if changed {
+        material.width = material.width.max(0.1);
+        material.height = material.height.max(0.1);
+        material.thickness = material.thickness.max(0.1);
+        sync_material_strings(material);
+        *version = version.wrapping_add(1);
+    }
+}
+
+fn drag_mm(ui: &mut egui::Ui, label: &str, value: &mut f32) -> egui::Response {
+    ui.label(egui::RichText::new(label).size(12.0).color(DIM));
+    ui.add(
+        egui::DragValue::new(value)
+            .speed(0.1)
+            .range(-10000.0..=10000.0)
+            .suffix(" mm"),
+    )
+}
+
+fn sync_material_strings(material: &mut MaterialState) {
+    material.width_s = format!("{:.1}", material.width);
+    material.height_s = format!("{:.1}", material.height);
+    material.thickness_s = format!("{:.1}", material.thickness);
+    material.offset_x_s = format!("{:.1}", material.offset_x);
+    material.offset_y_s = format!("{:.1}", material.offset_y);
+}
+
+fn job_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState, jstate: &JobState) {
     let is_running = jstate.status == JobStatus::Running;
     let is_paused = jstate.status == JobStatus::Paused;
+    let connected = mstate.connected;
 
     if is_running || is_paused {
         ui.columns(3, |cols| {
@@ -603,10 +648,7 @@ fn job_section(ui: &mut egui::Ui, engine: &Arc<Engine>, jstate: &JobState) {
             )
             .fill(egui::Color32::from_rgb(0x33, 0x2a, 0x00))
             .min_size(egui::vec2(0.0, 32.0));
-            if cols[0]
-                .add_sized([cols[0].available_width(), 32.0], pause)
-                .clicked()
-            {
+            if cols[0].add_enabled(connected, pause).clicked() {
                 if is_paused {
                     engine.resume_job();
                 } else {
@@ -617,20 +659,14 @@ fn job_section(ui: &mut egui::Ui, engine: &Arc<Engine>, jstate: &JobState) {
                 egui::Button::new(egui::RichText::new("STOP").size(14.0).color(AMBER).strong())
                     .fill(egui::Color32::from_rgb(0x33, 0x22, 0x00))
                     .min_size(egui::vec2(0.0, 32.0));
-            if cols[1]
-                .add_sized([cols[1].available_width(), 32.0], stop)
-                .clicked()
-            {
+            if cols[1].add_enabled(connected, stop).clicked() {
                 engine.stop_job();
             }
             let estop =
                 egui::Button::new(egui::RichText::new("E-STOP").size(14.0).color(RED).strong())
                     .fill(egui::Color32::from_rgb(0x33, 0x11, 0x11))
                     .min_size(egui::vec2(0.0, 32.0));
-            if cols[2]
-                .add_sized([cols[2].available_width(), 32.0], estop)
-                .clicked()
-            {
+            if cols[2].add_enabled(connected, estop).clicked() {
                 engine.stop_job();
                 engine.soft_reset();
             }
@@ -639,11 +675,39 @@ fn job_section(ui: &mut egui::Ui, engine: &Arc<Engine>, jstate: &JobState) {
         let estop = egui::Button::new(egui::RichText::new("E-STOP").size(14.0).color(RED).strong())
             .fill(egui::Color32::from_rgb(0x33, 0x11, 0x11))
             .min_size(egui::vec2(0.0, 32.0));
-        if ui.add_sized([ui.available_width(), 32.0], estop).clicked() {
+        if ui.add_enabled(connected, estop).clicked() {
             engine.stop_job();
             engine.soft_reset();
         }
     }
+}
+
+fn confirm(state: &mut ControlsState, action: ConfirmAction) -> bool {
+    let confirmed = state
+        .confirm
+        .map(|(pending, at)| pending == action && at.elapsed() < Duration::from_secs(3))
+        .unwrap_or(false);
+    if confirmed {
+        state.confirm = None;
+        true
+    } else {
+        state.confirm = Some((action, Instant::now()));
+        false
+    }
+}
+
+fn expire_confirm(state: &mut ControlsState) {
+    if state
+        .confirm
+        .map(|(_, at)| at.elapsed() >= Duration::from_secs(3))
+        .unwrap_or(false)
+    {
+        state.confirm = None;
+    }
+}
+
+fn can_jog(mstate: &MachineState) -> bool {
+    mstate.connected && matches!(mstate.status, Status::Idle | Status::Jog)
 }
 
 fn status_display(s: Status) -> (egui::Color32, &'static str) {

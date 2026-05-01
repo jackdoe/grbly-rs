@@ -104,21 +104,9 @@ fn main() {
     let mut gui = three_d::GUI::new(&context);
     let mut scene = Scene::new(&context);
 
-    let mut controls_state = ui::controls::ControlsState::default();
-    let mut editor_state = ui::editor::EditorState::default();
-    let mut console_state = ui::console::ConsoleState::default();
-    let mut material_state = ui::scene::MaterialState::default();
-    let mut material_version: u32 = 0;
-    let mut theme_set = false;
+    let mut ui_state = ui::app::UiState::default();
 
-    #[derive(Clone, Copy, PartialEq)]
-    enum CamDrag {
-        None,
-        Orbit,
-        Zoom,
-        Pan,
-    }
-    let mut cam_drag = CamDrag::None;
+    let mut camera_controller = ui::camera::CameraController::default();
 
     let mut frame_input_generator = FrameInputGenerator::from_winit_window(&winit_window);
 
@@ -129,94 +117,7 @@ fn main() {
         winit::event::Event::RedrawRequested(_) => {
             let mut frame_input = frame_input_generator.generate(&gl);
 
-            let active_drag = cam_drag;
-            for event in &mut frame_input.events {
-                match event {
-                    three_d::Event::MousePress {
-                        button,
-                        modifiers,
-                        handled,
-                        ..
-                    } if *button == three_d::MouseButton::Left
-                        && (modifiers.ctrl || modifiers.command) =>
-                    {
-                        cam_drag = CamDrag::Pan;
-                        *handled = true;
-                    }
-                    three_d::Event::MousePress {
-                        button,
-                        modifiers,
-                        handled,
-                        ..
-                    } if *button == three_d::MouseButton::Right
-                        && (modifiers.ctrl || modifiers.command) =>
-                    {
-                        cam_drag = CamDrag::Zoom;
-                        *handled = true;
-                    }
-                    three_d::Event::MousePress {
-                        button, handled, ..
-                    } if *button == three_d::MouseButton::Right => {
-                        cam_drag = CamDrag::Orbit;
-                        *handled = true;
-                    }
-                    three_d::Event::MouseRelease {
-                        button, handled, ..
-                    } if (*button == three_d::MouseButton::Left && active_drag == CamDrag::Pan)
-                        || (*button == three_d::MouseButton::Right
-                            && active_drag != CamDrag::Pan) =>
-                    {
-                        cam_drag = CamDrag::None;
-                        *handled = true;
-                    }
-                    three_d::Event::MouseMotion { delta, handled, .. }
-                        if active_drag == CamDrag::Pan =>
-                    {
-                        let pos = camera.position();
-                        let tgt = camera.target();
-                        let up = camera.up();
-                        let fwd = (tgt - pos).normalize();
-                        let speed = pos.distance(tgt) * 0.002;
-                        let right = fwd.cross(up).normalize();
-                        let cam_up = right.cross(fwd);
-                        let offset = right * (-delta.0 * speed) + cam_up * (delta.1 * speed);
-                        camera.set_view(pos + offset, tgt + offset, up);
-                        *handled = true;
-                    }
-                    three_d::Event::MouseMotion { delta, handled, .. }
-                        if active_drag == CamDrag::Orbit =>
-                    {
-                        let pos = camera.position();
-                        let tgt = camera.target();
-                        let off = pos - tgt;
-                        let dist = off.magnitude();
-                        let theta = off.y.atan2(off.x) - delta.0 * 0.005;
-                        let phi = (off.z / dist).acos() - delta.1 * 0.005;
-                        let phi = phi.clamp(0.05, std::f32::consts::PI - 0.05);
-                        let new_off = vec3(
-                            dist * phi.sin() * theta.cos(),
-                            dist * phi.sin() * theta.sin(),
-                            dist * phi.cos(),
-                        );
-                        camera.set_view(tgt + new_off, tgt, vec3(0.0, 0.0, 1.0));
-                        *handled = true;
-                    }
-                    three_d::Event::MouseMotion { delta, handled, .. }
-                        if active_drag == CamDrag::Zoom =>
-                    {
-                        let pos = camera.position();
-                        let tgt = camera.target();
-                        let up = camera.up();
-                        let dist = pos.distance(tgt);
-                        let factor = 1.0 - delta.1 * 0.005;
-                        let new_dist = (dist * factor).clamp(1.0, 10000.0);
-                        let fwd = (tgt - pos).normalize();
-                        camera.set_view(tgt - fwd * new_dist, tgt, up);
-                        *handled = true;
-                    }
-                    _ => {}
-                }
-            }
+            camera_controller.handle_events(&mut frame_input.events, &mut camera);
 
             let mstate = state.read().clone();
             let jstate = job.read().clone();
@@ -227,9 +128,9 @@ fn main() {
                 frame_input.viewport,
                 frame_input.device_pixel_ratio,
                 |ctx| {
-                    if !theme_set {
+                    if !ui_state.theme_set {
                         setup_theme(ctx);
-                        theme_set = true;
+                        ui_state.theme_set = true;
                     }
 
                     ui::controls::draw(
@@ -237,9 +138,9 @@ fn main() {
                         &engine,
                         &mstate,
                         &jstate,
-                        &mut controls_state,
-                        &mut material_state,
-                        &mut material_version,
+                        &mut ui_state.controls,
+                        &mut ui_state.material,
+                        &mut ui_state.material_version,
                     );
 
                     egui::TopBottomPanel::bottom("bottom_panels")
@@ -254,50 +155,41 @@ fn main() {
                                         mstate: &mstate,
                                         jstate: &jstate,
                                         job_lock: &job,
-                                        state: &mut editor_state,
-                                        material: &mut material_state,
-                                        material_version: &mut material_version,
+                                        state: &mut ui_state.editor,
+                                        material: &ui_state.material,
                                     },
                                 );
-                                ui::console::draw(&mut cols[1], &engine, &log, &mut console_state);
+                                ui::console::draw(
+                                    &mut cols[1],
+                                    &engine,
+                                    &log,
+                                    &mut ui_state.console,
+                                );
                             });
                         });
 
-                    handle_keyboard(ctx, &engine, &jstate, controls_state.jog_step);
+                    handle_keyboard(ctx, &engine, &mstate, &jstate, ui_state.controls.jog_step);
                 },
             );
 
-            for event in &mut frame_input.events {
-                if let three_d::Event::MouseWheel { delta, handled, .. } = event {
-                    if !*handled {
-                        let pos = camera.position();
-                        let tgt = camera.target();
-                        let up = camera.up();
-                        let dist = pos.distance(tgt);
-                        let factor = 1.0 - delta.1 * 0.001;
-                        let new_dist = (dist * factor).clamp(1.0, 10000.0);
-                        let fwd = (tgt - pos).normalize();
-                        camera.set_view(tgt - fwd * new_dist, tgt, up);
-                        *handled = true;
-                    }
-                }
-            }
+            camera_controller.handle_wheel(&mut frame_input.events, &mut camera);
 
             camera.set_viewport(frame_input.viewport);
 
-            let tool_pos = if editor_state.simulating {
-                editor_state.sim_pos
+            let tool_pos = if ui_state.editor.simulating {
+                ui_state.editor.sim_pos
             } else {
                 mstate.wpos
             };
-            scene.update(
-                &context,
+            scene.update(ui::scene::SceneUpdate {
+                context: &context,
                 tool_pos,
-                &mstate,
-                &jstate,
-                &material_state,
-                material_version,
-            );
+                mstate: &mstate,
+                jstate: &jstate,
+                material: &ui_state.material,
+                material_version: ui_state.material_version,
+                show_heatmap: ui_state.editor.show_heatmap,
+            });
 
             let objects = scene.collect();
             frame_input
@@ -323,18 +215,8 @@ fn main() {
                     *control_flow = ControlFlow::Exit;
                 }
                 winit::event::WindowEvent::DroppedFile(path) => {
-                    ui::editor::load_file(path, &job);
-                    let size = winit_window.inner_size();
-                    #[allow(deprecated)]
-                    let fake = winit::event::WindowEvent::CursorMoved {
-                        device_id: unsafe { std::mem::zeroed() },
-                        position: winit::dpi::PhysicalPosition::new(
-                            size.width as f64 / 2.0,
-                            size.height as f64 * 0.75,
-                        ),
-                        modifiers: winit::event::ModifiersState::default(),
-                    };
-                    frame_input_generator.handle_winit_window_event(&fake);
+                    ui::editor::start_load_file(path.clone(), &job, &mut ui_state.editor);
+                    winit_window.request_redraw();
                 }
                 _ => {}
             }
@@ -343,27 +225,34 @@ fn main() {
     });
 }
 
-fn handle_keyboard(ctx: &egui::Context, engine: &Arc<Engine>, jstate: &JobState, jog_step: f32) {
+fn handle_keyboard(
+    ctx: &egui::Context,
+    engine: &Arc<Engine>,
+    mstate: &MachineState,
+    jstate: &JobState,
+    jog_step: f32,
+) {
     if ctx.wants_keyboard_input() {
         return;
     }
+    let can_jog = mstate.connected && matches!(mstate.status, Status::Idle | Status::Jog);
     ctx.input(|input| {
-        if input.key_pressed(egui::Key::ArrowLeft) {
+        if can_jog && input.key_pressed(egui::Key::ArrowLeft) {
             engine.send(&format!("$J=G91 G21 X-{:.1} F1000", jog_step));
         }
-        if input.key_pressed(egui::Key::ArrowRight) {
+        if can_jog && input.key_pressed(egui::Key::ArrowRight) {
             engine.send(&format!("$J=G91 G21 X{:.1} F1000", jog_step));
         }
-        if input.key_pressed(egui::Key::ArrowUp) {
+        if can_jog && input.key_pressed(egui::Key::ArrowUp) {
             engine.send(&format!("$J=G91 G21 Y{:.1} F1000", jog_step));
         }
-        if input.key_pressed(egui::Key::ArrowDown) {
+        if can_jog && input.key_pressed(egui::Key::ArrowDown) {
             engine.send(&format!("$J=G91 G21 Y-{:.1} F1000", jog_step));
         }
-        if input.key_pressed(egui::Key::PageUp) {
+        if can_jog && input.key_pressed(egui::Key::PageUp) {
             engine.send(&format!("$J=G91 G21 Z{:.1} F500", jog_step));
         }
-        if input.key_pressed(egui::Key::PageDown) {
+        if can_jog && input.key_pressed(egui::Key::PageDown) {
             engine.send(&format!("$J=G91 G21 Z-{:.1} F500", jog_step));
         }
         if input.key_pressed(egui::Key::Space) {
