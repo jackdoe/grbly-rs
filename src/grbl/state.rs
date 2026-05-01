@@ -13,7 +13,6 @@ pub enum Status {
     Sleep,
 }
 
-
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Vec3 {
     pub x: f32,

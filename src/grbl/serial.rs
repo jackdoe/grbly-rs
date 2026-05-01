@@ -33,17 +33,20 @@ impl Serial {
         let port = serialport::new(port_name, baud)
             .timeout(Duration::from_millis(100))
             .open()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let reader_port = port
-            .try_clone()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
+        let reader_port = port.try_clone().map_err(io::Error::other)?;
         Ok(Self {
             port,
             reader: BufReader::new(reader_port),
         })
     }
 
-    pub fn into_parts(self) -> (Box<dyn serialport::SerialPort>, BufReader<Box<dyn serialport::SerialPort>>) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        Box<dyn serialport::SerialPort>,
+        BufReader<Box<dyn serialport::SerialPort>>,
+    ) {
         (self.port, self.reader)
     }
 }

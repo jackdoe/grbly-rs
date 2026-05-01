@@ -1,4 +1,4 @@
-pub mod scene;
+pub mod console;
 pub mod controls;
 pub mod editor;
-pub mod console;
+pub mod scene;

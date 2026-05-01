@@ -1,5 +1,5 @@
+use crate::grbl::state::{self, JobState, MachineState, Segment};
 use three_d::renderer::*;
-use crate::grbl::state::{self, MachineState, JobState, Segment};
 
 type V3 = state::Vec3;
 
@@ -36,8 +36,7 @@ impl Default for MaterialState {
     }
 }
 
-impl MaterialState {
-}
+impl MaterialState {}
 
 pub struct Scene {
     pub grid: Gm<Mesh, ColorMaterial>,
@@ -126,8 +125,20 @@ impl Scene {
         if jstate.version != self.last_version {
             self.last_version = jstate.version;
             if !jstate.segments.is_empty() {
-                self.toolpath = Some(build_toolpath(context, &jstate.segments, &jstate.seg_violations, jstate.bounds_min, jstate.bounds_max));
-                self.bounds_box = Some(build_wire_box(context, jstate.bounds_min, jstate.bounds_max, Srgba::new(0x55, 0x55, 0x77, 0x66), GRID_W));
+                self.toolpath = Some(build_toolpath(
+                    context,
+                    &jstate.segments,
+                    &jstate.seg_violations,
+                    jstate.bounds_min,
+                    jstate.bounds_max,
+                ));
+                self.bounds_box = Some(build_wire_box(
+                    context,
+                    jstate.bounds_min,
+                    jstate.bounds_max,
+                    Srgba::new(0x55, 0x55, 0x77, 0x66),
+                    GRID_W,
+                ));
             } else {
                 self.toolpath = None;
                 self.bounds_box = None;
@@ -150,8 +161,16 @@ impl Scene {
                 // Cubiko: XY home at MPos(0,0), travel goes positive to MPos(+tx,+ty)
                 //         Z  home at MPos(0),   travel goes negative to MPos(-tz)
                 // WPos = MPos - WCO
-                let home_w = V3 { x: -wco.x, y: -wco.y, z: -wco.z };
-                let far_w = V3 { x: tx - wco.x, y: ty - wco.y, z: -tz - wco.z };
+                let home_w = V3 {
+                    x: -wco.x,
+                    y: -wco.y,
+                    z: -wco.z,
+                };
+                let far_w = V3 {
+                    x: tx - wco.x,
+                    y: ty - wco.y,
+                    z: -tz - wco.z,
+                };
                 let bmin = V3 {
                     x: home_w.x.min(far_w.x),
                     y: home_w.y.min(far_w.y),
@@ -162,7 +181,13 @@ impl Scene {
                     y: home_w.y.max(far_w.y),
                     z: home_w.z.max(far_w.z),
                 };
-                self.machine_box = Some(build_wire_box(context, bmin, bmax, Srgba::new(0x44, 0x77, 0xbb, 0x99), LINE_W));
+                self.machine_box = Some(build_wire_box(
+                    context,
+                    bmin,
+                    bmax,
+                    Srgba::new(0x44, 0x77, 0xbb, 0x99),
+                    LINE_W,
+                ));
             } else {
                 self.machine_box = None;
             }
@@ -181,12 +206,24 @@ impl Scene {
 
     pub fn collect(&self) -> Vec<&Gm<Mesh, ColorMaterial>> {
         let mut out: Vec<&Gm<Mesh, ColorMaterial>> = vec![&self.grid, &self.triad];
-        if let Some(ref v) = self.machine_box { out.push(v); }
-        if let Some(ref v) = self.material_slab { out.push(v); }
-        if let Some(ref v) = self.toolpath { out.push(v); }
-        if let Some(ref v) = self.bounds_box { out.push(v); }
-        if let Some(ref v) = self.trail { out.push(v); }
-        if let Some(ref v) = self.gantry { out.push(v); }
+        if let Some(ref v) = self.machine_box {
+            out.push(v);
+        }
+        if let Some(ref v) = self.material_slab {
+            out.push(v);
+        }
+        if let Some(ref v) = self.toolpath {
+            out.push(v);
+        }
+        if let Some(ref v) = self.bounds_box {
+            out.push(v);
+        }
+        if let Some(ref v) = self.trail {
+            out.push(v);
+        }
+        if let Some(ref v) = self.gantry {
+            out.push(v);
+        }
         out
     }
 }
@@ -199,7 +236,11 @@ struct LineBuilder {
 
 impl LineBuilder {
     fn new() -> Self {
-        Self { positions: Vec::new(), colors: Vec::new(), indices: Vec::new() }
+        Self {
+            positions: Vec::new(),
+            colors: Vec::new(),
+            indices: Vec::new(),
+        }
     }
 
     fn add(&mut self, start: V3, end: V3, color: Srgba, width: f32) {
@@ -222,7 +263,8 @@ impl LineBuilder {
         self.positions.push(e + perp);
         self.positions.push(e - perp);
         self.colors.extend([color; 4]);
-        self.indices.extend([base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+        self.indices
+            .extend([base, base + 1, base + 2, base + 1, base + 3, base + 2]);
     }
 
     fn add_quad(&mut self, corners: [V3; 4], color: Srgba) {
@@ -231,7 +273,8 @@ impl LineBuilder {
             self.positions.push(v3(*c));
             self.colors.push(color);
         }
-        self.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
     fn build(self, context: &Context) -> Gm<Mesh, ColorMaterial> {
@@ -255,18 +298,69 @@ impl LineBuilder {
     }
 }
 
-fn build_wire_box(context: &Context, bmin: V3, bmax: V3, color: Srgba, width: f32) -> Gm<Mesh, ColorMaterial> {
+fn build_wire_box(
+    context: &Context,
+    bmin: V3,
+    bmax: V3,
+    color: Srgba,
+    width: f32,
+) -> Gm<Mesh, ColorMaterial> {
     let c = [
-        V3 { x: bmin.x, y: bmin.y, z: bmin.z },
-        V3 { x: bmax.x, y: bmin.y, z: bmin.z },
-        V3 { x: bmax.x, y: bmax.y, z: bmin.z },
-        V3 { x: bmin.x, y: bmax.y, z: bmin.z },
-        V3 { x: bmin.x, y: bmin.y, z: bmax.z },
-        V3 { x: bmax.x, y: bmin.y, z: bmax.z },
-        V3 { x: bmax.x, y: bmax.y, z: bmax.z },
-        V3 { x: bmin.x, y: bmax.y, z: bmax.z },
+        V3 {
+            x: bmin.x,
+            y: bmin.y,
+            z: bmin.z,
+        },
+        V3 {
+            x: bmax.x,
+            y: bmin.y,
+            z: bmin.z,
+        },
+        V3 {
+            x: bmax.x,
+            y: bmax.y,
+            z: bmin.z,
+        },
+        V3 {
+            x: bmin.x,
+            y: bmax.y,
+            z: bmin.z,
+        },
+        V3 {
+            x: bmin.x,
+            y: bmin.y,
+            z: bmax.z,
+        },
+        V3 {
+            x: bmax.x,
+            y: bmin.y,
+            z: bmax.z,
+        },
+        V3 {
+            x: bmax.x,
+            y: bmax.y,
+            z: bmax.z,
+        },
+        V3 {
+            x: bmin.x,
+            y: bmax.y,
+            z: bmax.z,
+        },
     ];
-    let edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
+    let edges = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ];
     let mut lb = LineBuilder::new();
     for (a, b) in edges {
         lb.add(c[a], c[b], color, width);
@@ -295,7 +389,16 @@ fn build_grid(context: &Context, x_span: f32, y_span: f32) -> Gm<Mesh, ColorMate
         } else {
             (mm1, GRID_W * 0.5)
         };
-        lb.add(V3 { x, y: 0.0, z: 0.0 }, V3 { x, y: y_max, z: 0.0 }, col, w);
+        lb.add(
+            V3 { x, y: 0.0, z: 0.0 },
+            V3 {
+                x,
+                y: y_max,
+                z: 0.0,
+            },
+            col,
+            w,
+        );
         x += 1.0;
     }
     let mut y = 0.0f32;
@@ -310,7 +413,16 @@ fn build_grid(context: &Context, x_span: f32, y_span: f32) -> Gm<Mesh, ColorMate
         } else {
             (mm1, GRID_W * 0.5)
         };
-        lb.add(V3 { x: 0.0, y, z: 0.0 }, V3 { x: x_max, y, z: 0.0 }, col, w);
+        lb.add(
+            V3 { x: 0.0, y, z: 0.0 },
+            V3 {
+                x: x_max,
+                y,
+                z: 0.0,
+            },
+            col,
+            w,
+        );
         y += 1.0;
     }
     lb.build(context)
@@ -319,9 +431,36 @@ fn build_grid(context: &Context, x_span: f32, y_span: f32) -> Gm<Mesh, ColorMate
 fn build_triad(context: &Context) -> Gm<Mesh, ColorMaterial> {
     let len = 15.0f32;
     let mut lb = LineBuilder::new();
-    lb.add(V3::default(), V3 { x: len, y: 0.0, z: 0.0 }, Srgba::new(0xff, 0x55, 0x55, 0xff), THICK_W);
-    lb.add(V3::default(), V3 { x: 0.0, y: len, z: 0.0 }, Srgba::new(0x55, 0xff, 0x55, 0xff), THICK_W);
-    lb.add(V3::default(), V3 { x: 0.0, y: 0.0, z: len }, Srgba::new(0x55, 0x88, 0xff, 0xff), THICK_W);
+    lb.add(
+        V3::default(),
+        V3 {
+            x: len,
+            y: 0.0,
+            z: 0.0,
+        },
+        Srgba::new(0xff, 0x55, 0x55, 0xff),
+        THICK_W,
+    );
+    lb.add(
+        V3::default(),
+        V3 {
+            x: 0.0,
+            y: len,
+            z: 0.0,
+        },
+        Srgba::new(0x55, 0xff, 0x55, 0xff),
+        THICK_W,
+    );
+    lb.add(
+        V3::default(),
+        V3 {
+            x: 0.0,
+            y: 0.0,
+            z: len,
+        },
+        Srgba::new(0x55, 0x88, 0xff, 0xff),
+        THICK_W,
+    );
     lb.build(context)
 }
 
@@ -337,44 +476,244 @@ fn build_material(context: &Context, mat: &MaterialState) -> Gm<Mesh, ColorMater
 
     // Top face (semi-transparent green)
     let top_col = Srgba::new(0x22, 0x88, 0x44, 0x33);
-    lb.add_quad([
-        V3 { x: x0, y: y0, z: z_top },
-        V3 { x: x1, y: y0, z: z_top },
-        V3 { x: x1, y: y1, z: z_top },
-        V3 { x: x0, y: y1, z: z_top },
-    ], top_col);
+    lb.add_quad(
+        [
+            V3 {
+                x: x0,
+                y: y0,
+                z: z_top,
+            },
+            V3 {
+                x: x1,
+                y: y0,
+                z: z_top,
+            },
+            V3 {
+                x: x1,
+                y: y1,
+                z: z_top,
+            },
+            V3 {
+                x: x0,
+                y: y1,
+                z: z_top,
+            },
+        ],
+        top_col,
+    );
 
     // Bottom face
     let bot_col = Srgba::new(0x22, 0x88, 0x44, 0x22);
-    lb.add_quad([
-        V3 { x: x0, y: y0, z: z_bot },
-        V3 { x: x1, y: y0, z: z_bot },
-        V3 { x: x1, y: y1, z: z_bot },
-        V3 { x: x0, y: y1, z: z_bot },
-    ], bot_col);
+    lb.add_quad(
+        [
+            V3 {
+                x: x0,
+                y: y0,
+                z: z_bot,
+            },
+            V3 {
+                x: x1,
+                y: y0,
+                z: z_bot,
+            },
+            V3 {
+                x: x1,
+                y: y1,
+                z: z_bot,
+            },
+            V3 {
+                x: x0,
+                y: y1,
+                z: z_bot,
+            },
+        ],
+        bot_col,
+    );
 
     // Wireframe edges
     let edge_col = Srgba::new(0x44, 0xff, 0x88, 0xaa);
     // Top edges
-    lb.add(V3 { x: x0, y: y0, z: z_top }, V3 { x: x1, y: y0, z: z_top }, edge_col, GRID_W);
-    lb.add(V3 { x: x1, y: y0, z: z_top }, V3 { x: x1, y: y1, z: z_top }, edge_col, GRID_W);
-    lb.add(V3 { x: x1, y: y1, z: z_top }, V3 { x: x0, y: y1, z: z_top }, edge_col, GRID_W);
-    lb.add(V3 { x: x0, y: y1, z: z_top }, V3 { x: x0, y: y0, z: z_top }, edge_col, GRID_W);
+    lb.add(
+        V3 {
+            x: x0,
+            y: y0,
+            z: z_top,
+        },
+        V3 {
+            x: x1,
+            y: y0,
+            z: z_top,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x1,
+            y: y0,
+            z: z_top,
+        },
+        V3 {
+            x: x1,
+            y: y1,
+            z: z_top,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x1,
+            y: y1,
+            z: z_top,
+        },
+        V3 {
+            x: x0,
+            y: y1,
+            z: z_top,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x0,
+            y: y1,
+            z: z_top,
+        },
+        V3 {
+            x: x0,
+            y: y0,
+            z: z_top,
+        },
+        edge_col,
+        GRID_W,
+    );
     // Bottom edges
-    lb.add(V3 { x: x0, y: y0, z: z_bot }, V3 { x: x1, y: y0, z: z_bot }, edge_col, GRID_W);
-    lb.add(V3 { x: x1, y: y0, z: z_bot }, V3 { x: x1, y: y1, z: z_bot }, edge_col, GRID_W);
-    lb.add(V3 { x: x1, y: y1, z: z_bot }, V3 { x: x0, y: y1, z: z_bot }, edge_col, GRID_W);
-    lb.add(V3 { x: x0, y: y1, z: z_bot }, V3 { x: x0, y: y0, z: z_bot }, edge_col, GRID_W);
+    lb.add(
+        V3 {
+            x: x0,
+            y: y0,
+            z: z_bot,
+        },
+        V3 {
+            x: x1,
+            y: y0,
+            z: z_bot,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x1,
+            y: y0,
+            z: z_bot,
+        },
+        V3 {
+            x: x1,
+            y: y1,
+            z: z_bot,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x1,
+            y: y1,
+            z: z_bot,
+        },
+        V3 {
+            x: x0,
+            y: y1,
+            z: z_bot,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x0,
+            y: y1,
+            z: z_bot,
+        },
+        V3 {
+            x: x0,
+            y: y0,
+            z: z_bot,
+        },
+        edge_col,
+        GRID_W,
+    );
     // Vertical edges
-    lb.add(V3 { x: x0, y: y0, z: z_top }, V3 { x: x0, y: y0, z: z_bot }, edge_col, GRID_W);
-    lb.add(V3 { x: x1, y: y0, z: z_top }, V3 { x: x1, y: y0, z: z_bot }, edge_col, GRID_W);
-    lb.add(V3 { x: x1, y: y1, z: z_top }, V3 { x: x1, y: y1, z: z_bot }, edge_col, GRID_W);
-    lb.add(V3 { x: x0, y: y1, z: z_top }, V3 { x: x0, y: y1, z: z_bot }, edge_col, GRID_W);
+    lb.add(
+        V3 {
+            x: x0,
+            y: y0,
+            z: z_top,
+        },
+        V3 {
+            x: x0,
+            y: y0,
+            z: z_bot,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x1,
+            y: y0,
+            z: z_top,
+        },
+        V3 {
+            x: x1,
+            y: y0,
+            z: z_bot,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x1,
+            y: y1,
+            z: z_top,
+        },
+        V3 {
+            x: x1,
+            y: y1,
+            z: z_bot,
+        },
+        edge_col,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: x0,
+            y: y1,
+            z: z_top,
+        },
+        V3 {
+            x: x0,
+            y: y1,
+            z: z_bot,
+        },
+        edge_col,
+        GRID_W,
+    );
 
     lb.build(context)
 }
 
-fn build_toolpath(context: &Context, segments: &[Segment], seg_violations: &[bool], bmin: V3, bmax: V3) -> Gm<Mesh, ColorMaterial> {
+fn build_toolpath(
+    context: &Context,
+    segments: &[Segment],
+    seg_violations: &[bool],
+    bmin: V3,
+    bmax: V3,
+) -> Gm<Mesh, ColorMaterial> {
     let mut lb = LineBuilder::new();
     for (i, seg) in segments.iter().enumerate() {
         let violated = seg_violations.get(i).copied().unwrap_or(false);
@@ -385,7 +724,13 @@ fn build_toolpath(context: &Context, segments: &[Segment], seg_violations: &[boo
         } else {
             depth_color(seg.end.z, bmin.z, bmax.z)
         };
-        let w = if violated { THICK_W } else if seg.rapid { GRID_W } else { LINE_W };
+        let w = if violated {
+            THICK_W
+        } else if seg.rapid {
+            GRID_W
+        } else {
+            LINE_W
+        };
         lb.add(seg.start, seg.end, color, w);
     }
     lb.build(context)
@@ -400,28 +745,138 @@ fn build_gantry(context: &Context, wpos: V3, z_top: f32) -> Gm<Mesh, ColorMateri
 
     let mut lb = LineBuilder::new();
     // Spindle column from top down to tool tip
-    lb.add(V3 { x: wpos.x, y: wpos.y, z: z_top }, V3 { x: wpos.x, y: wpos.y, z: wpos.z + 8.0 }, spin, LINE_W);
+    lb.add(
+        V3 {
+            x: wpos.x,
+            y: wpos.y,
+            z: z_top,
+        },
+        V3 {
+            x: wpos.x,
+            y: wpos.y,
+            z: wpos.z + 8.0,
+        },
+        spin,
+        LINE_W,
+    );
 
     let tw = 3.0f32;
     let tl = 8.0f32;
-    lb.add(V3 { x: wpos.x - tw, y: wpos.y, z: wpos.z + tl }, wpos, tip, GRID_W);
-    lb.add(V3 { x: wpos.x + tw, y: wpos.y, z: wpos.z + tl }, wpos, tip, GRID_W);
-    lb.add(V3 { x: wpos.x, y: wpos.y - tw, z: wpos.z + tl }, wpos, tip, GRID_W);
-    lb.add(V3 { x: wpos.x, y: wpos.y + tw, z: wpos.z + tl }, wpos, tip, GRID_W);
+    lb.add(
+        V3 {
+            x: wpos.x - tw,
+            y: wpos.y,
+            z: wpos.z + tl,
+        },
+        wpos,
+        tip,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: wpos.x + tw,
+            y: wpos.y,
+            z: wpos.z + tl,
+        },
+        wpos,
+        tip,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: wpos.x,
+            y: wpos.y - tw,
+            z: wpos.z + tl,
+        },
+        wpos,
+        tip,
+        GRID_W,
+    );
+    lb.add(
+        V3 {
+            x: wpos.x,
+            y: wpos.y + tw,
+            z: wpos.z + tl,
+        },
+        wpos,
+        tip,
+        GRID_W,
+    );
 
     // Drop line to Z=0
     if wpos.z.abs() > 0.5 {
-        lb.add(wpos, V3 { x: wpos.x, y: wpos.y, z: 0.0 }, drop_c, GRID_W);
+        lb.add(
+            wpos,
+            V3 {
+                x: wpos.x,
+                y: wpos.y,
+                z: 0.0,
+            },
+            drop_c,
+            GRID_W,
+        );
     }
     // Crosshair at tool tip
     let cd = 4.0f32;
-    lb.add(V3 { x: wpos.x - cd, y: wpos.y, z: wpos.z }, V3 { x: wpos.x + cd, y: wpos.y, z: wpos.z }, cross, LINE_W);
-    lb.add(V3 { x: wpos.x, y: wpos.y - cd, z: wpos.z }, V3 { x: wpos.x, y: wpos.y + cd, z: wpos.z }, cross, LINE_W);
+    lb.add(
+        V3 {
+            x: wpos.x - cd,
+            y: wpos.y,
+            z: wpos.z,
+        },
+        V3 {
+            x: wpos.x + cd,
+            y: wpos.y,
+            z: wpos.z,
+        },
+        cross,
+        LINE_W,
+    );
+    lb.add(
+        V3 {
+            x: wpos.x,
+            y: wpos.y - cd,
+            z: wpos.z,
+        },
+        V3 {
+            x: wpos.x,
+            y: wpos.y + cd,
+            z: wpos.z,
+        },
+        cross,
+        LINE_W,
+    );
     // Shadow on Z=0
     let shadow = Srgba::new(0x00, 0xff, 0xff, 0x33);
     let sd = 3.0f32;
-    lb.add(V3 { x: wpos.x - sd, y: wpos.y, z: 0.0 }, V3 { x: wpos.x + sd, y: wpos.y, z: 0.0 }, shadow, LINE_W);
-    lb.add(V3 { x: wpos.x, y: wpos.y - sd, z: 0.0 }, V3 { x: wpos.x, y: wpos.y + sd, z: 0.0 }, shadow, LINE_W);
+    lb.add(
+        V3 {
+            x: wpos.x - sd,
+            y: wpos.y,
+            z: 0.0,
+        },
+        V3 {
+            x: wpos.x + sd,
+            y: wpos.y,
+            z: 0.0,
+        },
+        shadow,
+        LINE_W,
+    );
+    lb.add(
+        V3 {
+            x: wpos.x,
+            y: wpos.y - sd,
+            z: 0.0,
+        },
+        V3 {
+            x: wpos.x,
+            y: wpos.y + sd,
+            z: 0.0,
+        },
+        shadow,
+        LINE_W,
+    );
 
     lb.build(context)
 }

@@ -72,8 +72,7 @@ impl Default for EditorState {
 }
 
 fn btn(text: &str) -> egui::Button<'_> {
-    egui::Button::new(egui::RichText::new(text).size(11.0))
-        .min_size(egui::vec2(0.0, 20.0))
+    egui::Button::new(egui::RichText::new(text).size(11.0)).min_size(egui::vec2(0.0, 20.0))
 }
 
 fn btn_col(text: &str, text_col: egui::Color32, fill: egui::Color32) -> egui::Button<'_> {
@@ -82,17 +81,28 @@ fn btn_col(text: &str, text_col: egui::Color32, fill: egui::Color32) -> egui::Bu
         .min_size(egui::vec2(0.0, 20.0))
 }
 
-pub fn draw(
-    ui: &mut egui::Ui,
-    engine: &Arc<Engine>,
-    mstate: &MachineState,
-    jstate: &JobState,
-    job_lock: &Arc<RwLock<JobState>>,
-    state: &mut EditorState,
-    material: &mut MaterialState,
-    material_version: &mut u32,
-) {
-    let spindle_warning_active = state.spindle_warn
+pub struct DrawArgs<'a> {
+    pub engine: &'a Arc<Engine>,
+    pub mstate: &'a MachineState,
+    pub jstate: &'a JobState,
+    pub job_lock: &'a Arc<RwLock<JobState>>,
+    pub state: &'a mut EditorState,
+    pub material: &'a mut MaterialState,
+    pub material_version: &'a mut u32,
+}
+
+pub fn draw(ui: &mut egui::Ui, args: DrawArgs<'_>) {
+    let DrawArgs {
+        engine,
+        mstate,
+        jstate,
+        job_lock,
+        state,
+        material,
+        material_version,
+    } = args;
+    let spindle_warning_active = state
+        .spindle_warn
         .map(|t| t.elapsed().as_secs() < 3)
         .unwrap_or(false);
     if !spindle_warning_active {
@@ -118,11 +128,26 @@ pub fn draw(
         ui.separator();
         ui.label(egui::RichText::new("SIM").size(10.0).color(CYAN));
         if state.simulating && state.sim_playing {
-            if ui.add(btn_col("PAUSE", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() {
+            if ui
+                .add(btn_col(
+                    "PAUSE",
+                    CYAN,
+                    egui::Color32::from_rgb(0x00, 0x22, 0x33),
+                ))
+                .clicked()
+            {
                 state.sim_playing = false;
-            state.simulating = false;
+                state.simulating = false;
             }
-        } else if ui.add(btn_col("PLAY", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() && has_lines {
+        } else if ui
+            .add(btn_col(
+                "PLAY",
+                CYAN,
+                egui::Color32::from_rgb(0x00, 0x22, 0x33),
+            ))
+            .clicked()
+            && has_lines
+        {
             if !state.simulating {
                 state.sim_seg = 0;
                 state.sim_frac = 0.0;
@@ -135,7 +160,15 @@ pub fn draw(
             state.sim_playing = true;
             state.sim_last_tick = Instant::now();
         }
-        if ui.add(btn_col("STEP", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() && has_lines {
+        if ui
+            .add(btn_col(
+                "STEP",
+                CYAN,
+                egui::Color32::from_rgb(0x00, 0x22, 0x33),
+            ))
+            .clicked()
+            && has_lines
+        {
             if !state.simulating {
                 state.simulating = true;
                 state.sim_seg = 0;
@@ -149,17 +182,29 @@ pub fn draw(
             let j = job_lock.read();
             if state.sim_seg < j.segments.len() {
                 let start_line = j.segments[state.sim_seg].line;
-                while state.sim_seg < j.segments.len() && j.segments[state.sim_seg].line == start_line {
+                while state.sim_seg < j.segments.len()
+                    && j.segments[state.sim_seg].line == start_line
+                {
                     state.sim_pos = j.segments[state.sim_seg].end;
                     state.sim_seg += 1;
                 }
                 state.sim_frac = 0.0;
-                if state.z_locked { state.sim_pos.z = 0.0; }
+                if state.z_locked {
+                    state.sim_pos.z = 0.0;
+                }
             }
             drop(j);
             job_lock.write().current_line = seg_to_line(&jstate.segments, state.sim_seg);
         }
-        if ui.add(btn_col("RESET", CYAN, egui::Color32::from_rgb(0x00, 0x22, 0x33))).clicked() && state.simulating {
+        if ui
+            .add(btn_col(
+                "RESET",
+                CYAN,
+                egui::Color32::from_rgb(0x00, 0x22, 0x33),
+            ))
+            .clicked()
+            && state.simulating
+        {
             state.sim_seg = 0;
             state.sim_frac = 0.0;
             state.sim_playing = false;
@@ -196,13 +241,36 @@ pub fn draw(
 
         ui.separator();
         ui.label(egui::RichText::new("LIVE").size(10.0).color(RED));
-        if ui.add(btn_col("RESET", AMBER, egui::Color32::from_rgb(0x22, 0x11, 0x00))).clicked() {
+        if ui
+            .add(btn_col(
+                "RESET",
+                AMBER,
+                egui::Color32::from_rgb(0x22, 0x11, 0x00),
+            ))
+            .clicked()
+        {
             engine.reset_job();
         }
-        if ui.add(btn_col("STEP", AMBER, egui::Color32::from_rgb(0x22, 0x11, 0x00))).clicked() && has_lines {
+        if ui
+            .add(btn_col(
+                "STEP",
+                AMBER,
+                egui::Color32::from_rgb(0x22, 0x11, 0x00),
+            ))
+            .clicked()
+            && has_lines
+        {
             engine.step_line();
         }
-        if ui.add(btn_col("START", GREEN, egui::Color32::from_rgb(0x11, 0x22, 0x00))).clicked() && has_lines {
+        if ui
+            .add(btn_col(
+                "START",
+                GREEN,
+                egui::Color32::from_rgb(0x11, 0x22, 0x00),
+            ))
+            .clicked()
+            && has_lines
+        {
             if mstate.spindle == 0.0 && !spindle_warning_active {
                 state.spindle_warn = Some(Instant::now());
             } else {
@@ -218,7 +286,11 @@ pub fn draw(
             .fill(egui::Color32::from_rgb(0x55, 0x11, 0x00))
             .inner_margin(egui::Margin::same(4.0));
         frame.show(ui, |ui: &mut egui::Ui| {
-            ui.label(egui::RichText::new("!! SPINDLE NOT RUNNING - CLICK START AGAIN TO OVERRIDE").size(12.0).color(RED));
+            ui.label(
+                egui::RichText::new("!! SPINDLE NOT RUNNING - CLICK START AGAIN TO OVERRIDE")
+                    .size(12.0)
+                    .color(RED),
+            );
         });
     }
 
@@ -228,24 +300,56 @@ pub fn draw(
         ui.label(egui::RichText::new("MAT").size(10.0).color(GREEN));
         let fw = 32.0;
         ui.label(egui::RichText::new("W").size(10.0).color(DIM));
-        ui.add(egui::TextEdit::singleline(&mut material.width_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.add(
+            egui::TextEdit::singleline(&mut material.width_s)
+                .desired_width(fw)
+                .font(egui::TextStyle::Monospace),
+        );
         ui.label(egui::RichText::new("H").size(10.0).color(DIM));
-        ui.add(egui::TextEdit::singleline(&mut material.height_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.add(
+            egui::TextEdit::singleline(&mut material.height_s)
+                .desired_width(fw)
+                .font(egui::TextStyle::Monospace),
+        );
         ui.label(egui::RichText::new("T").size(10.0).color(DIM));
-        ui.add(egui::TextEdit::singleline(&mut material.thickness_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.add(
+            egui::TextEdit::singleline(&mut material.thickness_s)
+                .desired_width(fw)
+                .font(egui::TextStyle::Monospace),
+        );
         ui.label(egui::RichText::new("X").size(10.0).color(DIM));
-        ui.add(egui::TextEdit::singleline(&mut material.offset_x_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.add(
+            egui::TextEdit::singleline(&mut material.offset_x_s)
+                .desired_width(fw)
+                .font(egui::TextStyle::Monospace),
+        );
         ui.label(egui::RichText::new("Y").size(10.0).color(DIM));
-        ui.add(egui::TextEdit::singleline(&mut material.offset_y_s).desired_width(fw).font(egui::TextStyle::Monospace));
+        ui.add(
+            egui::TextEdit::singleline(&mut material.offset_y_s)
+                .desired_width(fw)
+                .font(egui::TextStyle::Monospace),
+        );
     });
 
     // Auto-apply material changes: parse fields and bump version if values differ
     {
         let pw: f32 = material.width_s.trim().parse().unwrap_or(material.width);
         let ph: f32 = material.height_s.trim().parse().unwrap_or(material.height);
-        let pt: f32 = material.thickness_s.trim().parse().unwrap_or(material.thickness);
-        let px: f32 = material.offset_x_s.trim().parse().unwrap_or(material.offset_x);
-        let py: f32 = material.offset_y_s.trim().parse().unwrap_or(material.offset_y);
+        let pt: f32 = material
+            .thickness_s
+            .trim()
+            .parse()
+            .unwrap_or(material.thickness);
+        let px: f32 = material
+            .offset_x_s
+            .trim()
+            .parse()
+            .unwrap_or(material.offset_x);
+        let py: f32 = material
+            .offset_y_s
+            .trim()
+            .parse()
+            .unwrap_or(material.offset_y);
         let new_vals = (pw, ph, pt, px, py);
         if new_vals != state.last_material_vals {
             state.last_material_vals = new_vals;
@@ -270,13 +374,21 @@ pub fn draw(
     if state.simulating {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("FEED").size(11.0).color(DIM));
-            ui.add(egui::Slider::new(&mut state.sim_feed, 1.0..=500.0).suffix(" mm/s").logarithmic(true));
+            ui.add(
+                egui::Slider::new(&mut state.sim_feed, 1.0..=500.0)
+                    .suffix(" mm/s")
+                    .logarithmic(true),
+            );
             let total_dist = jstate.total_dist;
             let secs = (total_dist / state.sim_feed) as u32;
             let h = secs / 3600;
             let m = (secs % 3600) / 60;
             let s = secs % 60;
-            let time_str = if h > 0 { format!("{}h {:02}m {:02}s", h, m, s) } else { format!("{}m {:02}s", m, s) };
+            let time_str = if h > 0 {
+                format!("{}h {:02}m {:02}s", h, m, s)
+            } else {
+                format!("{}m {:02}s", m, s)
+            };
             ui.label(egui::RichText::new(time_str).size(11.0).color(DIM));
         });
         if state.sim_playing {
@@ -286,10 +398,16 @@ pub fn draw(
             let mut remaining = state.sim_feed * dt;
 
             while remaining > 0.0 && state.sim_seg < segments.len() {
-                if jstate.seg_violations.get(state.sim_seg).copied().unwrap_or(false) {
+                if jstate
+                    .seg_violations
+                    .get(state.sim_seg)
+                    .copied()
+                    .unwrap_or(false)
+                {
                     state.sim_playing = false;
-            state.simulating = false;
-                    state.warning = format!("SOFT LIMIT at line {}", segments[state.sim_seg].line + 1);
+                    state.simulating = false;
+                    state.warning =
+                        format!("SOFT LIMIT at line {}", segments[state.sim_seg].line + 1);
                     break;
                 }
                 let seg = &segments[state.sim_seg];
@@ -308,14 +426,16 @@ pub fn draw(
 
             if state.sim_seg >= segments.len() {
                 state.sim_playing = false;
-            state.simulating = false;
+                state.simulating = false;
                 state.sim_pos = segments.last().map(|s| s.end).unwrap_or_default();
                 job_lock.write().status = JobStatus::Complete;
             } else {
                 let seg = &segments[state.sim_seg];
                 state.sim_pos = seg.start.lerp(seg.end, state.sim_frac);
             }
-            if state.z_locked { state.sim_pos.z = 0.0; }
+            if state.z_locked {
+                state.sim_pos.z = 0.0;
+            }
             job_lock.write().current_line = seg_to_line(segments, state.sim_seg);
         }
     }
@@ -327,7 +447,8 @@ pub fn draw(
     } else {
         jstate.current_line
     };
-    let running = state.simulating || jstate.status == JobStatus::Running || jstate.current_line > 0;
+    let running =
+        state.simulating || jstate.status == JobStatus::Running || jstate.current_line > 0;
 
     if jstate.lines.is_empty() {
         ui.centered_and_justified(|ui| {
@@ -337,15 +458,25 @@ pub fn draw(
     }
 
     let z_lines: Vec<usize> = if state.z_filter {
-        (0..jstate.lines.len()).filter(|&i| has_z_word(&jstate.lines[i])).collect()
+        (0..jstate.lines.len())
+            .filter(|&i| has_z_word(&jstate.lines[i]))
+            .collect()
     } else {
         Vec::new()
     };
 
     if state.z_filter {
-        ui.label(egui::RichText::new(format!("{} Z-lines  [{}]", z_lines.len(), current)).size(11.0).color(DIM));
+        ui.label(
+            egui::RichText::new(format!("{} Z-lines  [{}]", z_lines.len(), current))
+                .size(11.0)
+                .color(DIM),
+        );
     } else {
-        ui.label(egui::RichText::new(format!("{} lines  [{}]", jstate.lines.len(), current)).size(11.0).color(DIM));
+        ui.label(
+            egui::RichText::new(format!("{} lines  [{}]", jstate.lines.len(), current))
+                .size(11.0)
+                .color(DIM),
+        );
     }
 
     let row_h = 17.0;
@@ -364,11 +495,25 @@ pub fn draw(
                                 egui::Color32::from_rgba_unmultiplied(0xff, 0xaa, 0x00, 0x22),
                             );
                         }
-                        ui.label(egui::RichText::new(format!("{:>5}", i + 1)).size(12.0).color(LINE_NUM));
+                        ui.label(
+                            egui::RichText::new(format!("{:>5}", i + 1))
+                                .size(12.0)
+                                .color(LINE_NUM),
+                        );
                         let is_violated = jstate.violated_lines.get(i).copied().unwrap_or(false);
-                        let line_col = if is_current { AMBER } else if is_violated { RED } else { CODE_TEXT };
+                        let line_col = if is_current {
+                            AMBER
+                        } else if is_violated {
+                            RED
+                        } else {
+                            CODE_TEXT
+                        };
                         ui.label(egui::RichText::new("Z").size(12.0).color(CYAN));
-                        ui.label(egui::RichText::new(&jstate.lines[i]).size(12.0).color(line_col));
+                        ui.label(
+                            egui::RichText::new(&jstate.lines[i])
+                                .size(12.0)
+                                .color(line_col),
+                        );
                     });
                     if is_current {
                         r.response.scroll_to_me(Some(egui::Align::Center));
@@ -399,13 +544,27 @@ pub fn draw(
                                 egui::Color32::from_rgba_unmultiplied(0xff, 0xaa, 0x00, 0x22),
                             );
                         }
-                        ui.label(egui::RichText::new(format!("{:>5}", i + 1)).size(12.0).color(LINE_NUM));
+                        ui.label(
+                            egui::RichText::new(format!("{:>5}", i + 1))
+                                .size(12.0)
+                                .color(LINE_NUM),
+                        );
                         if has_z {
                             ui.label(egui::RichText::new("Z").size(12.0).color(CYAN));
                         }
                         let is_violated = jstate.violated_lines.get(i).copied().unwrap_or(false);
-                        let line_col = if is_current { AMBER } else if is_violated { RED } else { CODE_TEXT };
-                        ui.label(egui::RichText::new(&jstate.lines[i]).size(12.0).color(line_col));
+                        let line_col = if is_current {
+                            AMBER
+                        } else if is_violated {
+                            RED
+                        } else {
+                            CODE_TEXT
+                        };
+                        ui.label(
+                            egui::RichText::new(&jstate.lines[i])
+                                .size(12.0)
+                                .color(line_col),
+                        );
                     });
                     if is_current {
                         r.response.scroll_to_me(Some(egui::Align::Center));
@@ -413,7 +572,10 @@ pub fn draw(
                 }
 
                 if win_end < n {
-                    ui.allocate_space(egui::vec2(ui.available_width(), (n - win_end) as f32 * row_h));
+                    ui.allocate_space(egui::vec2(
+                        ui.available_width(),
+                        (n - win_end) as f32 * row_h,
+                    ));
                 }
             });
     }

@@ -11,14 +11,9 @@ const RED: egui::Color32 = egui::Color32::from_rgb(0xff, 0x44, 0x44);
 const CMD: egui::Color32 = egui::Color32::from_rgb(0xff, 0xdd, 0xaa);
 const RESP: egui::Color32 = egui::Color32::from_rgb(0x88, 0x77, 0x44);
 
+#[derive(Default)]
 pub struct ConsoleState {
     pub input: String,
-}
-
-impl Default for ConsoleState {
-    fn default() -> Self {
-        Self { input: String::new() }
-    }
 }
 
 pub struct LogBuffer {
@@ -29,7 +24,11 @@ pub struct LogBuffer {
 
 impl LogBuffer {
     pub fn new() -> Self {
-        Self { lines: Vec::new(), last_line: String::new(), last_rep: 0 }
+        Self {
+            lines: Vec::new(),
+            last_line: String::new(),
+            last_rep: 0,
+        }
     }
 
     pub fn add(&mut self, line: String) {
@@ -62,9 +61,20 @@ pub fn draw(
     let log_lines: Vec<String> = log.lock().lines().to_vec();
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("CONSOLE").size(14.0).color(DIM).strong());
+        ui.label(
+            egui::RichText::new("CONSOLE")
+                .size(14.0)
+                .color(DIM)
+                .strong(),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(egui::RichText::new("OPEN LOG").size(12.0)).min_size(egui::vec2(70.0, 24.0))).clicked() {
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new("OPEN LOG").size(12.0))
+                        .min_size(egui::vec2(70.0, 24.0)),
+                )
+                .clicked()
+            {
                 let path = "/tmp/grbl.txt";
                 let _ = std::process::Command::new("xdg-open").arg(path).spawn();
             }
@@ -72,19 +82,26 @@ pub fn draw(
     });
 
     let available = ui.available_height() - 32.0;
-    ui.allocate_ui(egui::vec2(ui.available_width(), available.max(40.0)), |ui| {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                if log_lines.is_empty() {
-                    ui.label(egui::RichText::new("--- NO LOG ---").size(12.0).color(egui::Color32::from_rgb(0x33, 0x2a, 0x11)));
-                }
-                for line in &log_lines {
-                    ui.label(egui::RichText::new(line).size(12.0).color(line_color(line)));
-                }
-            });
-    });
+    ui.allocate_ui(
+        egui::vec2(ui.available_width(), available.max(40.0)),
+        |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if log_lines.is_empty() {
+                        ui.label(
+                            egui::RichText::new("--- NO LOG ---")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(0x33, 0x2a, 0x11)),
+                        );
+                    }
+                    for line in &log_lines {
+                        ui.label(egui::RichText::new(line).size(12.0).color(line_color(line)));
+                    }
+                });
+        },
+    );
 
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(">").size(14.0).color(DIM));

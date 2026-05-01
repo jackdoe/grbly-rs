@@ -1,9 +1,9 @@
+use std::collections::VecDeque;
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::VecDeque;
-use std::fs::OpenOptions;
 
 use parking_lot::{Condvar, Mutex, RwLock};
 
@@ -20,7 +20,12 @@ struct SendQueue {
 
 impl SendQueue {
     fn new(capacity: usize) -> Self {
-        Self { capacity, pending: VecDeque::new(), in_flight: VecDeque::new(), used: 0 }
+        Self {
+            capacity,
+            pending: VecDeque::new(),
+            in_flight: VecDeque::new(),
+            used: 0,
+        }
     }
 
     fn enqueue(&mut self, line: String) {
@@ -31,7 +36,9 @@ impl SendQueue {
         let mut out = Vec::new();
         while let Some(front) = self.pending.front() {
             let size = front.len() + 1;
-            if self.used + size > self.capacity && !self.in_flight.is_empty() { break; }
+            if self.used + size > self.capacity && !self.in_flight.is_empty() {
+                break;
+            }
             let line = self.pending.pop_front().unwrap();
             self.in_flight.push_back(size);
             self.used += size;
@@ -98,7 +105,9 @@ impl SendPipe {
     /// Enqueue a line and flush what fits to serial. Non-blocking.
     fn send(&self, line: &str) {
         let line = strip_gcode_comments(line);
-        if line.is_empty() { return; }
+        if line.is_empty() {
+            return;
+        }
         let to_send = {
             let mut q = self.queue.lock();
             q.enqueue(line);
@@ -122,11 +131,15 @@ impl SendPipe {
     /// Block until the queue has space for `line`, enqueue it, flush. Used by job streamer.
     fn send_blocking(&self, line: &str, cancel: &dyn Fn() -> bool) -> bool {
         let line = strip_gcode_comments(line);
-        if line.is_empty() { return true; }
+        if line.is_empty() {
+            return true;
+        }
         let to_send = {
             let mut q = self.queue.lock();
             while !q.has_space_for(line.len()) {
-                if cancel() { return false; }
+                if cancel() {
+                    return false;
+                }
                 self.buf_ready.wait(&mut q);
             }
             q.enqueue(line);
@@ -140,7 +153,9 @@ impl SendPipe {
     fn wait_idle(&self, cancel: &dyn Fn() -> bool) {
         let mut q = self.queue.lock();
         while !q.is_idle() {
-            if cancel() { return; }
+            if cancel() {
+                return;
+            }
             self.buf_ready.wait(&mut q);
         }
     }
@@ -171,7 +186,9 @@ impl SendPipe {
 
     /// The single place that writes to serial and logs sent commands.
     fn write_to_serial(&self, lines: &[String]) {
-        if lines.is_empty() { return; }
+        if lines.is_empty() {
+            return;
+        }
         {
             let mut wp = self.write_port.lock();
             if let Some(ref mut port) = *wp {
@@ -268,9 +285,15 @@ impl Engine {
         self.pipe.send(line);
     }
 
-    pub fn realtime(&self, b: u8) { self.pipe.realtime(b); }
-    pub fn feed_hold(&self) { self.realtime(b'!'); }
-    pub fn resume(&self) { self.realtime(b'~'); }
+    pub fn realtime(&self, b: u8) {
+        self.pipe.realtime(b);
+    }
+    pub fn feed_hold(&self) {
+        self.realtime(b'!');
+    }
+    pub fn resume(&self) {
+        self.realtime(b'~');
+    }
 
     pub fn soft_reset(&self) {
         self.realtime(0x18);
@@ -280,7 +303,9 @@ impl Engine {
     pub fn start_job(self: &Arc<Self>) {
         {
             let mut j = self.job.write();
-            if j.status == JobStatus::Running { return; }
+            if j.status == JobStatus::Running {
+                return;
+            }
             j.status = JobStatus::Running;
             j.current_line = 0;
         }
@@ -306,7 +331,9 @@ impl Engine {
     pub fn step_line(&self) {
         loop {
             let mut j = self.job.write();
-            if j.current_line >= j.lines.len() { return; }
+            if j.current_line >= j.lines.len() {
+                return;
+            }
             if j.current_line < j.violated_lines.len() && j.violated_lines[j.current_line] {
                 let msg = format!("SOFT LIMIT at line {}: blocked", j.current_line + 1);
                 drop(j);
@@ -318,7 +345,9 @@ impl Engine {
             j.current_line += 1;
             drop(j);
             let mut stripped = strip_gcode_comments(&line).trim().to_string();
-            if z_locked { stripped = strip_z_words(&stripped); }
+            if z_locked {
+                stripped = strip_z_words(&stripped);
+            }
             if !stripped.is_empty() {
                 self.pipe.send(&stripped);
                 return;
@@ -342,14 +371,19 @@ impl Engine {
         let cancel = || self.job.read().status != JobStatus::Running;
 
         for (i, line) in lines.iter().enumerate() {
-            if cancel() { return; }
+            if cancel() {
+                return;
+            }
             if i < violated_lines.len() && violated_lines[i] {
-                self.pipe.log(format!("SOFT LIMIT at line {}: {}", i + 1, line.trim()));
+                self.pipe
+                    .log(format!("SOFT LIMIT at line {}: {}", i + 1, line.trim()));
                 self.job.write().status = JobStatus::Idle;
                 return;
             }
             let mut stripped = strip_gcode_comments(line).trim().to_string();
-            if z_locked { stripped = strip_z_words(&stripped); }
+            if z_locked {
+                stripped = strip_z_words(&stripped);
+            }
             if stripped.is_empty() {
                 self.job.write().current_line = i + 1;
                 continue;
@@ -376,13 +410,17 @@ fn read_loop(
 ) {
     let mut buf = String::new();
     loop {
-        if stop.load(Ordering::Relaxed) { return; }
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         buf.clear();
         match reader.read_line(&mut buf) {
             Ok(0) => return,
             Ok(_) => {
                 let line = buf.trim().to_string();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 let r = parse_response(&line);
                 apply_response(&r, &state, &job, &pipe);
                 pipe.log(line);
@@ -396,7 +434,9 @@ fn read_loop(
 fn poll_loop(stop: Arc<AtomicBool>, pipe: Arc<SendPipe>) {
     loop {
         std::thread::sleep(Duration::from_millis(200));
-        if stop.load(Ordering::Relaxed) { return; }
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         pipe.realtime(b'?');
     }
 }
@@ -414,7 +454,9 @@ fn apply_response(
         ResponseType::Status => {
             let mut s = state.write();
             s.status = r.status;
-            if r.has_wco { s.wco = r.wco; }
+            if r.has_wco {
+                s.wco = r.wco;
+            }
             if r.has_mpos {
                 s.mpos = r.mpos;
                 s.wpos = Vec3 {
@@ -433,8 +475,12 @@ fn apply_response(
             }
             s.feed = r.feed;
             s.spindle = r.spindle;
-            if r.feed_ovr != 0 { s.feed_ovr = r.feed_ovr; }
-            if r.spindle_ovr != 0 { s.spindle_ovr = r.spindle_ovr; }
+            if r.feed_ovr != 0 {
+                s.feed_ovr = r.feed_ovr;
+            }
+            if r.spindle_ovr != 0 {
+                s.spindle_ovr = r.spindle_ovr;
+            }
         }
         ResponseType::Alarm => {
             state.write().status = Status::Alarm;
@@ -468,7 +514,9 @@ fn strip_z_words(line: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'Z' || bytes[i] == b'z' {
             i += 1;
-            while i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'.' || (bytes[i] >= b'0' && bytes[i] <= b'9')) {
+            while i < bytes.len()
+                && (bytes[i] == b'-' || bytes[i] == b'.' || (bytes[i] >= b'0' && bytes[i] <= b'9'))
+            {
                 i += 1;
             }
             while i < bytes.len() && bytes[i] == b' ' {

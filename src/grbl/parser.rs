@@ -62,7 +62,10 @@ impl Default for Response {
 
 pub fn parse_response(line: &str) -> Response {
     if line == "ok" {
-        return Response { resp_type: ResponseType::Ok, ..Default::default() };
+        return Response {
+            resp_type: ResponseType::Ok,
+            ..Default::default()
+        };
     }
     if let Some(rest) = line.strip_prefix("error:") {
         return Response {
@@ -89,7 +92,10 @@ pub fn parse_response(line: &str) -> Response {
         };
     }
     if line.starts_with("Grbl ") {
-        return Response { resp_type: ResponseType::Welcome, ..Default::default() };
+        return Response {
+            resp_type: ResponseType::Welcome,
+            ..Default::default()
+        };
     }
     if line.starts_with('$') && line.contains('=') {
         if let Some((num_str, val_str)) = line[1..].split_once('=') {
@@ -109,7 +115,10 @@ pub fn parse_response(line: &str) -> Response {
 
 fn parse_status(s: &str) -> Response {
     let fields: Vec<&str> = s.split('|').collect();
-    let mut r = Response { resp_type: ResponseType::Status, ..Default::default() };
+    let mut r = Response {
+        resp_type: ResponseType::Status,
+        ..Default::default()
+    };
     if fields.is_empty() {
         return r;
     }
@@ -208,7 +217,14 @@ mod tests {
         let r = parse_response("<Run|MPos:1.000,2.000,3.000|FS:500,8000|Ov:100,100,100>");
         assert_eq!(r.resp_type, ResponseType::Status);
         assert_eq!(r.status, Status::Run);
-        assert_eq!(r.mpos, Vec3 { x: 1.0, y: 2.0, z: 3.0 });
+        assert_eq!(
+            r.mpos,
+            Vec3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0
+            }
+        );
         assert_eq!(r.feed, 500.0);
         assert_eq!(r.spindle, 8000.0);
         assert_eq!(r.feed_ovr, 100);
@@ -218,7 +234,14 @@ mod tests {
     #[test]
     fn parse_status_with_wpos() {
         let r = parse_response("<Idle|WPos:10.000,20.000,-5.000|FS:0,0>");
-        assert_eq!(r.wpos, Vec3 { x: 10.0, y: 20.0, z: -5.0 });
+        assert_eq!(
+            r.wpos,
+            Vec3 {
+                x: 10.0,
+                y: 20.0,
+                z: -5.0
+            }
+        );
     }
 
     #[test]
@@ -232,7 +255,14 @@ mod tests {
         let r = parse_response("<Door:0|MPos:0.000,0.000,0.000,0.000|Bf:35,111|FS:0,9000>");
         assert_eq!(r.resp_type, ResponseType::Status);
         assert_eq!(r.status, Status::Door);
-        assert_eq!(r.mpos, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+        assert_eq!(
+            r.mpos,
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0
+            }
+        );
     }
 
     #[test]

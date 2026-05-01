@@ -13,17 +13,42 @@ struct Parser {
 }
 
 pub fn parse_with_bounds(lines: &[String]) -> (Vec<Segment>, Vec3, Vec3) {
-    let mut p = Parser { pos: Vec3::default(), absolute: true, metric: true, motion: 0 };
-    let mut bmin = Vec3 { x: f32::MAX, y: f32::MAX, z: f32::MAX };
-    let mut bmax = Vec3 { x: f32::MIN, y: f32::MIN, z: f32::MIN };
+    let mut p = Parser {
+        pos: Vec3::default(),
+        absolute: true,
+        metric: true,
+        motion: 0,
+    };
+    let mut bmin = Vec3 {
+        x: f32::MAX,
+        y: f32::MAX,
+        z: f32::MAX,
+    };
+    let mut bmax = Vec3 {
+        x: f32::MIN,
+        y: f32::MIN,
+        z: f32::MIN,
+    };
 
     let update_bounds = |v: Vec3, bmin: &mut Vec3, bmax: &mut Vec3| {
-        if v.x < bmin.x { bmin.x = v.x; }
-        if v.y < bmin.y { bmin.y = v.y; }
-        if v.z < bmin.z { bmin.z = v.z; }
-        if v.x > bmax.x { bmax.x = v.x; }
-        if v.y > bmax.y { bmax.y = v.y; }
-        if v.z > bmax.z { bmax.z = v.z; }
+        if v.x < bmin.x {
+            bmin.x = v.x;
+        }
+        if v.y < bmin.y {
+            bmin.y = v.y;
+        }
+        if v.z < bmin.z {
+            bmin.z = v.z;
+        }
+        if v.x > bmax.x {
+            bmax.x = v.x;
+        }
+        if v.y > bmax.y {
+            bmax.y = v.y;
+        }
+        if v.z > bmax.z {
+            bmax.z = v.z;
+        }
     };
 
     update_bounds(p.pos, &mut bmin, &mut bmax);
@@ -40,13 +65,19 @@ pub fn parse_with_bounds(lines: &[String]) -> (Vec<Segment>, Vec3, Vec3) {
 }
 
 fn strip_comments(line: &str) -> String {
-    let line = if let Some(idx) = line.find(';') { &line[..idx] } else { line };
+    let line = if let Some(idx) = line.find(';') {
+        &line[..idx]
+    } else {
+        line
+    };
     let mut out = String::new();
     let mut depth = 0i32;
     for c in line.chars() {
         match c {
             '(' => depth += 1,
-            ')' => { depth -= 1; }
+            ')' => {
+                depth -= 1;
+            }
             _ if depth == 0 => out.push(c),
             _ => {}
         }
@@ -65,7 +96,7 @@ fn parse_words(s: &str) -> Vec<Word> {
             continue;
         }
         let b = bytes[i];
-        let is_alpha = (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z');
+        let is_alpha = b.is_ascii_alphabetic();
         if !is_alpha {
             i += 1;
             continue;
@@ -73,7 +104,8 @@ fn parse_words(s: &str) -> Vec<Word> {
         let letter = b & 0xDF;
         i += 1;
         let j = i;
-        while i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'.' || (bytes[i] >= b'0' && bytes[i] <= b'9')) {
+        while i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'.' || bytes[i].is_ascii_digit())
+        {
             i += 1;
         }
         let val: f64 = s[j..i].parse().unwrap_or(0.0);
@@ -102,24 +134,60 @@ impl Parser {
 
         for w in &words {
             match w.letter {
-                b'G' => {
-                    match w.value as i32 {
-                        0 => { self.motion = 0; has_motion = true; }
-                        1 => { self.motion = 1; has_motion = true; }
-                        2 => { self.motion = 2; has_motion = true; }
-                        3 => { self.motion = 3; has_motion = true; }
-                        90 => { self.absolute = true; }
-                        91 => { self.absolute = false; }
-                        20 => { self.metric = false; }
-                        21 => { self.metric = true; }
-                        _ => {}
+                b'G' => match w.value as i32 {
+                    0 => {
+                        self.motion = 0;
+                        has_motion = true;
                     }
+                    1 => {
+                        self.motion = 1;
+                        has_motion = true;
+                    }
+                    2 => {
+                        self.motion = 2;
+                        has_motion = true;
+                    }
+                    3 => {
+                        self.motion = 3;
+                        has_motion = true;
+                    }
+                    90 => {
+                        self.absolute = true;
+                    }
+                    91 => {
+                        self.absolute = false;
+                    }
+                    20 => {
+                        self.metric = false;
+                    }
+                    21 => {
+                        self.metric = true;
+                    }
+                    _ => {}
+                },
+                b'X' => {
+                    x = w.value;
+                    got_x = true;
+                    has_motion = true;
                 }
-                b'X' => { x = w.value; got_x = true; has_motion = true; }
-                b'Y' => { y = w.value; got_y = true; has_motion = true; }
-                b'Z' => { z = w.value; got_z = true; has_motion = true; }
-                b'I' => { ii = w.value; got_i = true; }
-                b'J' => { jj = w.value; got_j = true; }
+                b'Y' => {
+                    y = w.value;
+                    got_y = true;
+                    has_motion = true;
+                }
+                b'Z' => {
+                    z = w.value;
+                    got_z = true;
+                    has_motion = true;
+                }
+                b'I' => {
+                    ii = w.value;
+                    got_i = true;
+                }
+                b'J' => {
+                    jj = w.value;
+                    got_j = true;
+                }
                 b'F' => {}
                 _ => {}
             }
@@ -131,13 +199,25 @@ impl Parser {
 
         let mut target = self.pos;
         if self.absolute {
-            if got_x { target.x = x as f32; }
-            if got_y { target.y = y as f32; }
-            if got_z { target.z = z as f32; }
+            if got_x {
+                target.x = x as f32;
+            }
+            if got_y {
+                target.y = y as f32;
+            }
+            if got_z {
+                target.z = z as f32;
+            }
         } else {
-            if got_x { target.x += x as f32; }
-            if got_y { target.y += y as f32; }
-            if got_z { target.z += z as f32; }
+            if got_x {
+                target.x += x as f32;
+            }
+            if got_y {
+                target.y += y as f32;
+            }
+            if got_z {
+                target.z += z as f32;
+            }
         }
 
         match self.motion {
@@ -153,8 +233,12 @@ impl Parser {
             }
             2 | 3 => {
                 let mut center = self.pos;
-                if got_i { center.x += ii as f32; }
-                if got_j { center.y += jj as f32; }
+                if got_i {
+                    center.x += ii as f32;
+                }
+                if got_j {
+                    center.y += jj as f32;
+                }
                 let segs = tessellate_arc(self.pos, target, center, self.motion == 2, line_num);
                 self.pos = target;
                 segs
@@ -164,7 +248,13 @@ impl Parser {
     }
 }
 
-fn tessellate_arc(start: Vec3, end: Vec3, center: Vec3, clockwise: bool, line: usize) -> Vec<Segment> {
+fn tessellate_arc(
+    start: Vec3,
+    end: Vec3,
+    center: Vec3,
+    clockwise: bool,
+    line: usize,
+) -> Vec<Segment> {
     let start_angle = ((start.y - center.y) as f64).atan2((start.x - center.x) as f64);
     let mut end_angle = ((end.y - center.y) as f64).atan2((end.x - center.x) as f64);
 
@@ -179,7 +269,8 @@ fn tessellate_arc(start: Vec3, end: Vec3, center: Vec3, clockwise: bool, line: u
     let total_angle = end_angle - start_angle;
     let step_size = 2.0 * std::f64::consts::PI / 36.0;
     let steps = ((total_angle.abs() / step_size).max(1.0)) as usize;
-    let radius = (((start.x - center.x) as f64).powi(2) + ((start.y - center.y) as f64).powi(2)).sqrt();
+    let radius =
+        (((start.x - center.x) as f64).powi(2) + ((start.y - center.y) as f64).powi(2)).sqrt();
 
     let mut segs = Vec::with_capacity(steps);
     let mut prev = start;
@@ -191,7 +282,12 @@ fn tessellate_arc(start: Vec3, end: Vec3, center: Vec3, clockwise: bool, line: u
             y: center.y + (radius * angle.sin()) as f32,
             z: start.z + (t as f32) * (end.z - start.z),
         };
-        segs.push(Segment { start: prev, end: pt, rapid: false, line });
+        segs.push(Segment {
+            start: prev,
+            end: pt,
+            rapid: false,
+            line,
+        });
         prev = pt;
     }
     segs
@@ -215,7 +311,14 @@ mod tests {
         let segs = parse(&lines(&["G90 G21", "G0 X10 Y10 Z5", "G1 X20 Y20 Z-1 F500"]));
         assert_eq!(segs.len(), 2);
         assert!(segs[0].rapid);
-        assert_eq!(segs[0].end, Vec3 { x: 10.0, y: 10.0, z: 5.0 });
+        assert_eq!(
+            segs[0].end,
+            Vec3 {
+                x: 10.0,
+                y: 10.0,
+                z: 5.0
+            }
+        );
         assert!(!segs[1].rapid);
         assert_eq!(segs[1].end.x, 20.0);
         assert_eq!(segs[1].end.y, 20.0);
@@ -241,7 +344,11 @@ mod tests {
 
     #[test]
     fn comment_stripping() {
-        let segs = parse(&lines(&["G0 X10 (this is a comment)", "; full line comment", "G0 X20"]));
+        let segs = parse(&lines(&[
+            "G0 X10 (this is a comment)",
+            "; full line comment",
+            "G0 X20",
+        ]));
         assert_eq!(segs.len(), 2);
     }
 
