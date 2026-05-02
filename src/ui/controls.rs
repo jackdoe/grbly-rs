@@ -466,6 +466,17 @@ fn machine_actions(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineStat
             engine.send("$X");
         }
     });
+    if ui
+        .add_enabled(
+            can_idle,
+            egui::Button::new(egui::RichText::new("WORK HOME XYZ0").size(14.0))
+                .fill(BTN_BG)
+                .min_size(egui::vec2(ui.available_width(), 28.0)),
+        )
+        .clicked()
+    {
+        engine.send("G90 G21 G0 X0 Y0 Z0");
+    }
     ui.columns(2, |cols| {
         if cols[0].add_enabled(can_idle, wide_btn("ZERO XY")).clicked() {
             engine.send("G10 L20 P1 X0 Y0");
