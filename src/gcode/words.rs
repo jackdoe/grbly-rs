@@ -56,42 +56,6 @@ pub fn has_word(line: &str, letter: u8) -> bool {
     parse_words(line).iter().any(|w| w.letter == letter)
 }
 
-pub fn strip_words(line: &str, letters: &[u8]) -> String {
-    let clean = strip_comments(line);
-    let bytes = clean.as_bytes();
-    let mut out = String::with_capacity(clean.len());
-    let mut i = 0;
-
-    while i < bytes.len() {
-        let b = bytes[i];
-        if !b.is_ascii_alphabetic() {
-            out.push(b as char);
-            i += 1;
-            continue;
-        }
-
-        let letter = b.to_ascii_uppercase();
-        let value_start = i + 1;
-        let value_end = number_end(bytes, value_start);
-        let strip = value_end > value_start
-            && letters
-                .iter()
-                .any(|candidate| candidate.to_ascii_uppercase() == letter);
-
-        if strip {
-            i = value_end;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-        } else {
-            out.push(b as char);
-            i += 1;
-        }
-    }
-
-    out.trim().to_string()
-}
-
 fn number_end(bytes: &[u8], mut i: usize) -> usize {
     if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
         i += 1;
@@ -172,9 +136,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn strips_selected_words_only() {
-        assert_eq!(strip_words("G1 X1 Z-0.5 F100", b"Z"), "G1 X1 F100");
-        assert_eq!(strip_words("G1 X1 (Z9)", b"Z"), "G1 X1");
-    }
 }

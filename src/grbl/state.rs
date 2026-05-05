@@ -54,6 +54,7 @@ pub struct MachineState {
     pub soft_limits: bool,
     pub max_travel: Vec3,
     pub last_error: String,
+    pub probe_active: bool,
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -73,6 +74,7 @@ pub struct Segment {
     pub line: usize,
 }
 
+use crate::grbl::heightmap::HeightMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -84,7 +86,6 @@ pub struct JobState {
     pub segments: Arc<Vec<Segment>>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
-    pub z_locked: bool,
     pub total_dist: f32,
     pub seg_violations: Arc<Vec<bool>>,
     pub violated_lines: Arc<Vec<bool>>,
@@ -92,6 +93,7 @@ pub struct JobState {
     pub line_pass_counts: Arc<Vec<u16>>,
     pub pass_tolerance_mm: f32,
     pub version: usize,
+    pub heightmap: Option<Arc<HeightMap>>,
 }
 
 pub const DEFAULT_PASS_TOLERANCE_MM: f32 = 0.05;

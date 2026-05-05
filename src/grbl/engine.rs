@@ -2,16 +2,43 @@ use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex, RwLock};
 
-use crate::gcode::words::{strip_comments, strip_words};
+use crate::gcode::transform::transform_for_stream;
+use crate::gcode::words::strip_comments;
 
 use super::parser::{parse_response, Response, ResponseType};
 use super::serial::Serial;
 use super::state::*;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ProbeReply {
+    pub prb: Vec3,
+    pub ok: bool,
+}
+
+#[derive(Debug)]
+pub enum ProbeError {
+    Busy,
+    Timeout,
+    NoContact,
+    NotConnected,
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProbeError::Busy => write!(f, "probe already in flight"),
+            ProbeError::Timeout => write!(f, "probe timed out"),
+            ProbeError::NoContact => write!(f, "probe never triggered (wire? depth?)"),
+            ProbeError::NotConnected => write!(f, "machine not connected"),
+        }
+    }
+}
 
 struct SendQueue {
     capacity: usize,
@@ -86,6 +113,7 @@ struct SendPipe {
     state: Arc<RwLock<MachineState>>,
     on_log: OnLog,
     file_log: Mutex<std::fs::File>,
+    probe_result_tx: Mutex<Option<Sender<ProbeReply>>>,
 }
 
 impl SendPipe {
@@ -103,6 +131,7 @@ impl SendPipe {
             state,
             on_log: Arc::new(Mutex::new(None)),
             file_log: Mutex::new(file),
+            probe_result_tx: Mutex::new(None),
         }
     }
 
@@ -280,6 +309,7 @@ pub struct Engine {
     pub job: Arc<RwLock<JobState>>,
     pipe: Arc<SendPipe>,
     stop_flag: Mutex<Option<Arc<AtomicBool>>>,
+    probe_in_flight: AtomicBool,
 }
 
 impl Engine {
@@ -289,6 +319,7 @@ impl Engine {
             job,
             pipe: Arc::new(SendPipe::new(state)),
             stop_flag: Mutex::new(None),
+            probe_in_flight: AtomicBool::new(false),
         }
     }
 
@@ -415,27 +446,43 @@ impl Engine {
         if self.job.read().status == JobStatus::Running {
             return;
         }
+        let (transformed, src, lines_len, violated_lines) = {
+            let j = self.job.read();
+            let lines = j.lines.clone();
+            let hmap = j.heightmap.clone();
+            let lines_len = j.lines.len();
+            let violated_lines = j.violated_lines.clone();
+            drop(j);
+            let (t, s) = transform_for_stream(&lines, hmap.as_deref());
+            (t, s, lines_len, violated_lines)
+        };
+
         loop {
             let mut j = self.job.write();
-            if j.current_line >= j.lines.len() {
+            if j.current_line >= lines_len {
                 return;
             }
-            if j.current_line < j.violated_lines.len() && j.violated_lines[j.current_line] {
-                let msg = format!("SOFT LIMIT at line {}: blocked", j.current_line + 1);
+            let source = j.current_line;
+            if source < violated_lines.len() && violated_lines[source] {
+                let msg = format!("SOFT LIMIT at line {}: blocked", source + 1);
                 drop(j);
                 self.pipe.log(msg);
                 return;
             }
-            let line = j.lines[j.current_line].clone();
-            let z_locked = j.z_locked;
             j.current_line += 1;
             drop(j);
-            let mut stripped = strip_comments(&line).trim().to_string();
-            if z_locked {
-                stripped = strip_words(&stripped, b"Z");
+
+            let start_idx = src.partition_point(|&s| s < source);
+            let end_idx = src.partition_point(|&s| s <= source);
+            let mut sent_any = false;
+            for line in &transformed[start_idx..end_idx] {
+                let stripped = strip_comments(line).trim().to_string();
+                if !stripped.is_empty() {
+                    self.pipe.send(&stripped);
+                    sent_any = true;
+                }
             }
-            if !stripped.is_empty() {
-                self.pipe.send(&stripped);
+            if sent_any {
                 return;
             }
         }
@@ -447,12 +494,53 @@ impl Engine {
         j.status = JobStatus::Idle;
     }
 
+    pub fn probe_at(
+        &self,
+        x: f32,
+        y: f32,
+        safe_z: f32,
+        max_depth: f32,
+        feed: f32,
+    ) -> Result<f32, ProbeError> {
+        if !self.state.read().connected {
+            return Err(ProbeError::NotConnected);
+        }
+        if self.probe_in_flight.swap(true, Ordering::Acquire) {
+            return Err(ProbeError::Busy);
+        }
+
+        let (tx, rx) = mpsc::channel::<ProbeReply>();
+        *self.pipe.probe_result_tx.lock() = Some(tx);
+
+        self.pipe
+            .send(&format!("G90 G21 G0 X{:.3} Y{:.3} Z{:.3}", x, y, safe_z));
+        self.pipe
+            .send(&format!("G38.3 Z-{:.3} F{:.1}", max_depth, feed));
+
+        let result = rx.recv_timeout(Duration::from_secs(60));
+        *self.pipe.probe_result_tx.lock() = None;
+
+        self.pipe.send(&format!("G90 G21 G0 Z{:.3}", safe_z));
+        self.probe_in_flight.store(false, Ordering::Release);
+
+        let reply = result.map_err(|_| ProbeError::Timeout)?;
+        if !reply.ok {
+            return Err(ProbeError::NoContact);
+        }
+        let wco = self.state.read().wco;
+        Ok(reply.prb.z - wco.z)
+    }
+
     fn stream_job(&self) {
-        let j = self.job.read();
-        let lines = j.lines.clone();
-        let z_locked = j.z_locked;
-        let violated_lines = j.violated_lines.clone();
-        drop(j);
+        let (lines, violated_lines, transformed, src) = {
+            let j = self.job.read();
+            let lines = j.lines.clone();
+            let violated_lines = j.violated_lines.clone();
+            let hmap = j.heightmap.clone();
+            drop(j);
+            let (t, s) = transform_for_stream(&lines, hmap.as_deref());
+            (lines, violated_lines, t, s)
+        };
 
         let should_stop = || {
             matches!(
@@ -462,7 +550,7 @@ impl Engine {
         };
         let is_paused = || self.job.read().status == JobStatus::Paused;
 
-        for (i, line) in lines.iter().enumerate() {
+        for (i, line) in transformed.iter().enumerate() {
             if should_stop() {
                 return;
             }
@@ -472,24 +560,25 @@ impl Engine {
                     return;
                 }
             }
-            if i < violated_lines.len() && violated_lines[i] {
-                self.pipe
-                    .log(format!("SOFT LIMIT at line {}: {}", i + 1, line.trim()));
+            let source_line = src[i];
+            if source_line < violated_lines.len() && violated_lines[source_line] {
+                self.pipe.log(format!(
+                    "SOFT LIMIT at line {}: {}",
+                    source_line + 1,
+                    lines[source_line].trim()
+                ));
                 self.job.write().status = JobStatus::Idle;
                 return;
             }
-            let mut stripped = strip_comments(line).trim().to_string();
-            if z_locked {
-                stripped = strip_words(&stripped, b"Z");
-            }
+            let stripped = strip_comments(line).trim().to_string();
             if stripped.is_empty() {
-                self.job.write().current_line = i + 1;
+                self.job.write().current_line = source_line + 1;
                 continue;
             }
             if !self.pipe.send_job_line(&stripped, &should_stop, &is_paused) {
                 return;
             }
-            self.job.write().current_line = i + 1;
+            self.job.write().current_line = source_line + 1;
         }
         if self.pipe.wait_job_idle(&should_stop, &is_paused) && !should_stop() {
             self.job.write().status = JobStatus::Complete;
@@ -583,6 +672,7 @@ fn apply_response(
             if r.spindle_ovr != 0 {
                 s.spindle_ovr = r.spindle_ovr;
             }
+            s.probe_active = r.has_pins && r.pins.contains('P');
         }
         ResponseType::Alarm => {
             state.write().status = Status::Alarm;
@@ -604,6 +694,14 @@ fn apply_response(
             let mut s = state.write();
             s.status = Status::Idle;
             s.alarm_code = 0;
+        }
+        ResponseType::Probe => {
+            if let Some(tx) = pipe.probe_result_tx.lock().as_ref() {
+                let _ = tx.send(ProbeReply {
+                    prb: r.prb,
+                    ok: r.probe_ok,
+                });
+            }
         }
         _ => {}
     }

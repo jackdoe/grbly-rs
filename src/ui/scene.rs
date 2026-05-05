@@ -3,50 +3,24 @@ use three_d::renderer::*;
 
 type V3 = state::Vec3;
 
-/// User-editable material/workpiece parameters
-#[derive(Clone, Debug)]
-pub struct MaterialState {
-    pub width: f32,
-    pub height: f32,
-    pub thickness: f32,
-    pub offset_x: f32,
-    pub offset_y: f32,
-    // String buffers for text fields
-    pub width_s: String,
-    pub height_s: String,
-    pub thickness_s: String,
-    pub offset_x_s: String,
-    pub offset_y_s: String,
+pub struct ProbePreview {
+    pub bbox_min: (f32, f32),
+    pub bbox_max: (f32, f32),
+    pub grid_x: u32,
+    pub grid_y: u32,
+    pub samples: Option<Vec<Option<f32>>>,
+    pub current_index: Option<usize>,
 }
-
-impl Default for MaterialState {
-    fn default() -> Self {
-        Self {
-            width: 50.8,
-            height: 76.2,
-            thickness: 1.6,
-            offset_x: 0.0,
-            offset_y: 0.0,
-            width_s: "50.8".into(),
-            height_s: "76.2".into(),
-            thickness_s: "1.6".into(),
-            offset_x_s: "0".into(),
-            offset_y_s: "0".into(),
-        }
-    }
-}
-
-impl MaterialState {}
 
 pub struct Scene {
     pub grid: Gm<Mesh, ColorMaterial>,
     pub triad: Gm<Mesh, ColorMaterial>,
     pub machine_box: Option<Gm<Mesh, ColorMaterial>>,
-    pub material_slab: Option<Gm<Mesh, ColorMaterial>>,
     pub toolpath: Option<Gm<Mesh, ColorMaterial>>,
     pub gantry: Option<Gm<Mesh, ColorMaterial>>,
     pub trail: Option<Gm<Mesh, ColorMaterial>>,
     pub bounds_box: Option<Gm<Mesh, ColorMaterial>>,
+    pub probe_points: Option<Gm<Mesh, ColorMaterial>>,
     trail_points: Vec<V3>,
     trail_dirty: bool,
     last_pos: V3,
@@ -54,8 +28,18 @@ pub struct Scene {
     last_connected: bool,
     last_wco: V3,
     last_max_travel: V3,
-    last_material_version: u32,
     last_show_heatmap: bool,
+    last_probe_signature: ProbeSignature,
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct ProbeSignature {
+    bbox_min: (f32, f32),
+    bbox_max: (f32, f32),
+    grid_x: u32,
+    grid_y: u32,
+    samples: Vec<Option<f32>>,
+    current_index: Option<usize>,
 }
 
 pub struct SceneUpdate<'a> {
@@ -63,9 +47,8 @@ pub struct SceneUpdate<'a> {
     pub tool_pos: V3,
     pub mstate: &'a MachineState,
     pub jstate: &'a JobState,
-    pub material: &'a MaterialState,
-    pub material_version: u32,
     pub show_heatmap: bool,
+    pub probe_preview: Option<ProbePreview>,
 }
 
 const LINE_W: f32 = 0.3;
@@ -87,11 +70,11 @@ impl Scene {
             grid: build_grid(context, 200.0, 200.0),
             triad: build_triad(context),
             machine_box: None,
-            material_slab: None,
             toolpath: None,
             gantry: None,
             trail: None,
             bounds_box: None,
+            probe_points: None,
             trail_points: Vec::new(),
             trail_dirty: false,
             last_pos: V3::default(),
@@ -99,8 +82,8 @@ impl Scene {
             last_connected: false,
             last_wco: V3::default(),
             last_max_travel: V3::default(),
-            last_material_version: u32::MAX,
             last_show_heatmap: true,
+            last_probe_signature: ProbeSignature::default(),
         }
     }
 
@@ -110,9 +93,8 @@ impl Scene {
             tool_pos,
             mstate,
             jstate,
-            material,
-            material_version,
             show_heatmap,
+            probe_preview,
         } = args;
 
         let wpos = tool_pos;
@@ -210,14 +192,20 @@ impl Scene {
             }
         }
 
-        // Update material slab
-        if material_version != self.last_material_version {
-            self.last_material_version = material_version;
-            if material.width > 0.0 && material.height > 0.0 && material.thickness > 0.0 {
-                self.material_slab = Some(build_material(context, material));
-            } else {
-                self.material_slab = None;
-            }
+        let new_sig = match &probe_preview {
+            None => ProbeSignature::default(),
+            Some(p) => ProbeSignature {
+                bbox_min: p.bbox_min,
+                bbox_max: p.bbox_max,
+                grid_x: p.grid_x,
+                grid_y: p.grid_y,
+                samples: p.samples.clone().unwrap_or_default(),
+                current_index: p.current_index,
+            },
+        };
+        if new_sig != self.last_probe_signature {
+            self.last_probe_signature = new_sig;
+            self.probe_points = probe_preview.as_ref().and_then(|p| build_probe_points(context, p));
         }
     }
 
@@ -226,13 +214,13 @@ impl Scene {
         if let Some(ref v) = self.machine_box {
             out.push(v);
         }
-        if let Some(ref v) = self.material_slab {
-            out.push(v);
-        }
         if let Some(ref v) = self.toolpath {
             out.push(v);
         }
         if let Some(ref v) = self.bounds_box {
+            out.push(v);
+        }
+        if let Some(ref v) = self.probe_points {
             out.push(v);
         }
         if let Some(ref v) = self.trail {
@@ -282,16 +270,6 @@ impl LineBuilder {
         self.colors.extend([color; 4]);
         self.indices
             .extend([base, base + 1, base + 2, base + 1, base + 3, base + 2]);
-    }
-
-    fn add_quad(&mut self, corners: [V3; 4], color: Srgba) {
-        let base = self.positions.len() as u32;
-        for c in &corners {
-            self.positions.push(v3(*c));
-            self.colors.push(color);
-        }
-        self.indices
-            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
     fn build(self, context: &Context) -> Gm<Mesh, ColorMaterial> {
@@ -481,248 +459,60 @@ fn build_triad(context: &Context) -> Gm<Mesh, ColorMaterial> {
     lb.build(context)
 }
 
-fn build_material(context: &Context, mat: &MaterialState) -> Gm<Mesh, ColorMaterial> {
-    let x0 = mat.offset_x;
-    let y0 = mat.offset_y;
-    let x1 = x0 + mat.width;
-    let y1 = y0 + mat.height;
-    let z_top = 0.0f32;
-    let z_bot = -mat.thickness;
-
+fn build_probe_points(context: &Context, p: &ProbePreview) -> Option<Gm<Mesh, ColorMaterial>> {
+    if p.grid_x < 2 || p.grid_y < 2 {
+        return None;
+    }
+    if p.bbox_max.0 <= p.bbox_min.0 || p.bbox_max.1 <= p.bbox_min.1 {
+        return None;
+    }
     let mut lb = LineBuilder::new();
-
-    // Top face (semi-transparent green)
-    let top_col = Srgba::new(0x22, 0x88, 0x44, 0x33);
-    lb.add_quad(
-        [
-            V3 {
-                x: x0,
-                y: y0,
-                z: z_top,
-            },
-            V3 {
-                x: x1,
-                y: y0,
-                z: z_top,
-            },
-            V3 {
-                x: x1,
-                y: y1,
-                z: z_top,
-            },
-            V3 {
-                x: x0,
-                y: y1,
-                z: z_top,
-            },
-        ],
-        top_col,
-    );
-
-    // Bottom face
-    let bot_col = Srgba::new(0x22, 0x88, 0x44, 0x22);
-    lb.add_quad(
-        [
-            V3 {
-                x: x0,
-                y: y0,
-                z: z_bot,
-            },
-            V3 {
-                x: x1,
-                y: y0,
-                z: z_bot,
-            },
-            V3 {
-                x: x1,
-                y: y1,
-                z: z_bot,
-            },
-            V3 {
-                x: x0,
-                y: y1,
-                z: z_bot,
-            },
-        ],
-        bot_col,
-    );
-
-    // Wireframe edges
-    let edge_col = Srgba::new(0x44, 0xff, 0x88, 0xaa);
-    // Top edges
-    lb.add(
-        V3 {
-            x: x0,
-            y: y0,
-            z: z_top,
-        },
-        V3 {
-            x: x1,
-            y: y0,
-            z: z_top,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x1,
-            y: y0,
-            z: z_top,
-        },
-        V3 {
-            x: x1,
-            y: y1,
-            z: z_top,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x1,
-            y: y1,
-            z: z_top,
-        },
-        V3 {
-            x: x0,
-            y: y1,
-            z: z_top,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x0,
-            y: y1,
-            z: z_top,
-        },
-        V3 {
-            x: x0,
-            y: y0,
-            z: z_top,
-        },
-        edge_col,
-        GRID_W,
-    );
-    // Bottom edges
-    lb.add(
-        V3 {
-            x: x0,
-            y: y0,
-            z: z_bot,
-        },
-        V3 {
-            x: x1,
-            y: y0,
-            z: z_bot,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x1,
-            y: y0,
-            z: z_bot,
-        },
-        V3 {
-            x: x1,
-            y: y1,
-            z: z_bot,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x1,
-            y: y1,
-            z: z_bot,
-        },
-        V3 {
-            x: x0,
-            y: y1,
-            z: z_bot,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x0,
-            y: y1,
-            z: z_bot,
-        },
-        V3 {
-            x: x0,
-            y: y0,
-            z: z_bot,
-        },
-        edge_col,
-        GRID_W,
-    );
-    // Vertical edges
-    lb.add(
-        V3 {
-            x: x0,
-            y: y0,
-            z: z_top,
-        },
-        V3 {
-            x: x0,
-            y: y0,
-            z: z_bot,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x1,
-            y: y0,
-            z: z_top,
-        },
-        V3 {
-            x: x1,
-            y: y0,
-            z: z_bot,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x1,
-            y: y1,
-            z: z_top,
-        },
-        V3 {
-            x: x1,
-            y: y1,
-            z: z_bot,
-        },
-        edge_col,
-        GRID_W,
-    );
-    lb.add(
-        V3 {
-            x: x0,
-            y: y1,
-            z: z_top,
-        },
-        V3 {
-            x: x0,
-            y: y1,
-            z: z_bot,
-        },
-        edge_col,
-        GRID_W,
-    );
-
-    lb.build(context)
+    let total = p.grid_x as usize * p.grid_y as usize;
+    let pending = Srgba::new(0xff, 0xaa, 0x00, 0xcc);
+    let probed = Srgba::new(0x00, 0xff, 0x88, 0xff);
+    let active = Srgba::new(0x00, 0xcc, 0xff, 0xff);
+    for idx in 0..total {
+        let i = (idx % p.grid_x as usize) as u32;
+        let j = (idx / p.grid_x as usize) as u32;
+        let fx = i as f32 / (p.grid_x - 1) as f32;
+        let fy = j as f32 / (p.grid_y - 1) as f32;
+        let x = p.bbox_min.0 + fx * (p.bbox_max.0 - p.bbox_min.0);
+        let y = p.bbox_min.1 + fy * (p.bbox_max.1 - p.bbox_min.1);
+        let sample_z = p
+            .samples
+            .as_ref()
+            .and_then(|s| s.get(idx).copied().flatten());
+        let z = sample_z.unwrap_or(0.0);
+        let color = if Some(idx) == p.current_index {
+            active
+        } else if sample_z.is_some() {
+            probed
+        } else {
+            pending
+        };
+        let r = if Some(idx) == p.current_index { 2.0 } else { 1.5 };
+        lb.add(
+            V3 { x: x - r, y, z },
+            V3 { x: x + r, y, z },
+            color,
+            LINE_W,
+        );
+        lb.add(
+            V3 { x, y: y - r, z },
+            V3 { x, y: y + r, z },
+            color,
+            LINE_W,
+        );
+        lb.add(
+            V3 { x, y, z: z - 0.5 },
+            V3 { x, y, z: z + 1.5 },
+            color,
+            GRID_W,
+        );
+    }
+    Some(lb.build(context))
 }
+
 
 fn build_toolpath(
     context: &Context,

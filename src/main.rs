@@ -11,9 +11,11 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 use grbl::engine::Engine;
+use grbl::heightmap;
 use grbl::state::*;
 use ui::console::LogBuffer;
-use ui::scene::Scene;
+use ui::probe::ProbeState;
+use ui::scene::{ProbePreview, Scene};
 
 fn setup_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
@@ -63,6 +65,11 @@ fn setup_theme(ctx: &egui::Context) {
 fn main() {
     let state = Arc::new(RwLock::new(MachineState::default()));
     let job = Arc::new(RwLock::new(JobState::default()));
+    if let Some(map) = heightmap::load_cached() {
+        let mut j = job.write();
+        j.heightmap = Some(Arc::new(map));
+        j.version = j.version.wrapping_add(1);
+    }
     let engine = Arc::new(Engine::new(state.clone(), job.clone()));
     let log = Arc::new(Mutex::new(LogBuffer::new()));
 
@@ -138,9 +145,9 @@ fn main() {
                         &engine,
                         &mstate,
                         &jstate,
+                        &job,
                         &mut ui_state.controls,
-                        &mut ui_state.material,
-                        &mut ui_state.material_version,
+                        &mut ui_state.probe,
                     );
 
                     egui::TopBottomPanel::bottom("bottom_panels")
@@ -156,7 +163,6 @@ fn main() {
                                         jstate: &jstate,
                                         job_lock: &job,
                                         state: &mut ui_state.editor,
-                                        material: &ui_state.material,
                                     },
                                 );
                                 ui::console::draw(
@@ -186,9 +192,8 @@ fn main() {
                 tool_pos,
                 mstate: &mstate,
                 jstate: &jstate,
-                material: &ui_state.material,
-                material_version: ui_state.material_version,
                 show_heatmap: ui_state.editor.show_heatmap,
+                probe_preview: build_probe_preview(&jstate, &ui_state.probe),
             });
 
             let objects = scene.collect();
@@ -223,6 +228,43 @@ fn main() {
         }
         _ => {}
     });
+}
+
+fn build_probe_preview(jstate: &JobState, probe: &ProbeState) -> Option<ProbePreview> {
+    let bbox_valid = jstate.bounds_max.x > jstate.bounds_min.x
+        && jstate.bounds_max.y > jstate.bounds_min.y;
+    if !bbox_valid {
+        return None;
+    }
+    let (bbox_min, bbox_max, gx, gy, samples, current_index) =
+        if let Some(map) = &jstate.heightmap {
+            (
+                map.bbox_min,
+                map.bbox_max,
+                map.grid_x,
+                map.grid_y,
+                Some(map.z.iter().map(|z| Some(*z)).collect()),
+                None,
+            )
+        } else {
+            let (s, ci) = probe.samples_snapshot();
+            (
+                (jstate.bounds_min.x, jstate.bounds_min.y),
+                (jstate.bounds_max.x, jstate.bounds_max.y),
+                probe.grid_x,
+                probe.grid_y,
+                if s.is_empty() { None } else { Some(s) },
+                ci,
+            )
+        };
+    Some(ProbePreview {
+        bbox_min,
+        bbox_max,
+        grid_x: gx,
+        grid_y: gy,
+        samples,
+        current_index,
+    })
 }
 
 fn handle_keyboard(

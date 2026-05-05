@@ -11,7 +11,6 @@ use crate::gcode;
 use crate::gcode::words::has_word;
 use crate::grbl::engine::Engine;
 use crate::grbl::state::*;
-use crate::ui::scene::MaterialState;
 
 pub struct LoadReport {
     pub line_count: usize,
@@ -97,7 +96,6 @@ pub struct EditorState {
     pub warning: String,
     pub sim_pos: Vec3,
     pub sim_feed: f32,
-    pub z_locked: bool,
     pub filter: EditorFilter,
     pub sim_line: usize,
     pub jump_line: usize,
@@ -123,7 +121,6 @@ impl Default for EditorState {
             warning: String::new(),
             sim_pos: Vec3::default(),
             sim_feed: 20.0,
-            z_locked: false,
             filter: EditorFilter::All,
             sim_line: 0,
             jump_line: 1,
@@ -156,7 +153,6 @@ pub struct DrawArgs<'a> {
     pub jstate: &'a JobState,
     pub job_lock: &'a Arc<RwLock<JobState>>,
     pub state: &'a mut EditorState,
-    pub material: &'a MaterialState,
 }
 
 pub fn draw(ui: &mut egui::Ui, args: DrawArgs<'_>) {
@@ -166,7 +162,6 @@ pub fn draw(ui: &mut egui::Ui, args: DrawArgs<'_>) {
         jstate,
         job_lock,
         state,
-        material,
     } = args;
 
     poll_load_task(ui, state);
@@ -184,7 +179,6 @@ pub fn draw(ui: &mut egui::Ui, args: DrawArgs<'_>) {
             jstate,
             job_lock,
             state,
-            material,
             has_lines,
         },
     );
@@ -402,7 +396,6 @@ struct ToolbarArgs<'a> {
     jstate: &'a JobState,
     job_lock: &'a Arc<RwLock<JobState>>,
     state: &'a mut EditorState,
-    material: &'a MaterialState,
     has_lines: bool,
 }
 
@@ -413,7 +406,6 @@ fn draw_toolbar(ui: &mut egui::Ui, args: ToolbarArgs<'_>) {
         jstate,
         job_lock,
         state,
-        material,
         has_lines,
     } = args;
     ui.horizontal(|ui| {
@@ -484,20 +476,6 @@ fn draw_toolbar(ui: &mut egui::Ui, args: ToolbarArgs<'_>) {
         }
 
         ui.separator();
-        let zl_text = if state.z_locked { "ZL ON" } else { "ZL" };
-        let zl_fill = if state.z_locked {
-            egui::Color32::from_rgb(0x88, 0x00, 0x00)
-        } else {
-            egui::Color32::from_rgb(0x22, 0x11, 0x11)
-        };
-        if ui.add(btn_col(zl_text, RED, zl_fill)).clicked() {
-            state.z_locked = !state.z_locked;
-            let mut j = job_lock.write();
-            j.z_locked = state.z_locked;
-            j.version = j.version.wrapping_add(1);
-        }
-
-        ui.separator();
         ui.label(egui::RichText::new("LIVE").size(10.0).color(RED));
         if ui
             .add_enabled(
@@ -550,19 +528,6 @@ fn draw_toolbar(ui: &mut egui::Ui, args: ToolbarArgs<'_>) {
             }
         }
 
-        ui.separator();
-        ui.label(
-            egui::RichText::new(format!(
-                "MAT {:.1}x{:.1} T{:.1} O{:.1},{:.1}",
-                material.width,
-                material.height,
-                material.thickness,
-                material.offset_x,
-                material.offset_y
-            ))
-            .size(10.0)
-            .color(DIM),
-        );
     });
 }
 
@@ -744,9 +709,6 @@ fn advance_simulation(
         state.sim_pos = seg.start.lerp(seg.end, state.sim_frac);
         state.sim_line = seg_to_line(segments, state.sim_seg);
     }
-    if state.z_locked {
-        state.sim_pos.z = 0.0;
-    }
 }
 
 fn reset_simulation(state: &mut EditorState) {
@@ -770,9 +732,6 @@ fn step_simulation_line(state: &mut EditorState, jstate: &JobState) {
         }
         state.sim_frac = 0.0;
         state.sim_line = seg_to_line(&jstate.segments, state.sim_seg);
-        if state.z_locked {
-            state.sim_pos.z = 0.0;
-        }
     } else {
         state.sim_line = jstate.lines.len();
     }

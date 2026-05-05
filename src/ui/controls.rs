@@ -1,7 +1,8 @@
 use crate::grbl::engine::Engine;
 use crate::grbl::serial;
 use crate::grbl::state::*;
-use crate::ui::scene::MaterialState;
+use crate::ui::probe::ProbeState;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use three_d::egui;
@@ -19,7 +20,7 @@ enum ControlsTab {
     Run,
     Jog,
     Setup,
-    Material,
+    Probe,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,9 +80,9 @@ pub fn draw(
     engine: &Arc<Engine>,
     mstate: &MachineState,
     jstate: &JobState,
+    job_lock: &Arc<RwLock<JobState>>,
     ui_state: &mut ControlsState,
-    material: &mut MaterialState,
-    material_version: &mut u32,
+    probe_state: &mut ProbeState,
 ) {
     expire_confirm(ui_state);
     egui::SidePanel::left("controls")
@@ -101,7 +102,9 @@ pub fn draw(
                     ControlsTab::Run => run_section(ui, engine, mstate, jstate, ui_state),
                     ControlsTab::Jog => jog_section(ui, engine, mstate, ui_state),
                     ControlsTab::Setup => setup_section(ui, engine, mstate, ui_state),
-                    ControlsTab::Material => material_section(ui, material, material_version),
+                    ControlsTab::Probe => crate::ui::probe::draw(
+                        ui, engine, mstate, jstate, job_lock, probe_state,
+                    ),
                 }
             });
         });
@@ -214,7 +217,7 @@ fn tab_bar(ui: &mut egui::Ui, state: &mut ControlsState) {
             ("RUN", ControlsTab::Run),
             ("JOG", ControlsTab::Jog),
             ("SETUP", ControlsTab::Setup),
-            ("MAT", ControlsTab::Material),
+            ("PROBE", ControlsTab::Probe),
         ] {
             if ui
                 .selectable_label(state.tab == tab, egui::RichText::new(label).size(12.0))
@@ -477,12 +480,18 @@ fn machine_actions(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineStat
     {
         engine.send("G90 G21 G0 X0 Y0 Z0");
     }
-    ui.columns(2, |cols| {
+    ui.columns(3, |cols| {
         if cols[0].add_enabled(can_idle, wide_btn("ZERO XY")).clicked() {
             engine.send("G10 L20 P1 X0 Y0");
         }
         if cols[1].add_enabled(can_idle, wide_btn("ZERO Z")).clicked() {
             engine.send("G10 L20 P1 Z0");
+        }
+        let xyz = egui::Button::new(egui::RichText::new("ZERO XYZ").size(14.0).color(GREEN))
+            .fill(egui::Color32::from_rgb(0x11, 0x33, 0x11))
+            .min_size(egui::vec2(0.0, 28.0));
+        if cols[2].add_enabled(can_idle, xyz).clicked() {
+            engine.send("G10 L20 P1 X0 Y0 Z0");
         }
     });
 }
@@ -602,29 +611,6 @@ fn travel_editor(
     }
 }
 
-fn material_section(ui: &mut egui::Ui, material: &mut MaterialState, version: &mut u32) {
-    section(ui, "Material");
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        changed |= drag_mm(ui, "W", &mut material.width).changed();
-        changed |= drag_mm(ui, "H", &mut material.height).changed();
-    });
-    ui.horizontal(|ui| {
-        changed |= drag_mm(ui, "T", &mut material.thickness).changed();
-    });
-    ui.horizontal(|ui| {
-        changed |= drag_mm(ui, "X", &mut material.offset_x).changed();
-        changed |= drag_mm(ui, "Y", &mut material.offset_y).changed();
-    });
-    if changed {
-        material.width = material.width.max(0.1);
-        material.height = material.height.max(0.1);
-        material.thickness = material.thickness.max(0.1);
-        sync_material_strings(material);
-        *version = version.wrapping_add(1);
-    }
-}
-
 fn drag_mm(ui: &mut egui::Ui, label: &str, value: &mut f32) -> egui::Response {
     ui.label(egui::RichText::new(label).size(12.0).color(DIM));
     ui.add(
@@ -633,14 +619,6 @@ fn drag_mm(ui: &mut egui::Ui, label: &str, value: &mut f32) -> egui::Response {
             .range(-10000.0..=10000.0)
             .suffix(" mm"),
     )
-}
-
-fn sync_material_strings(material: &mut MaterialState) {
-    material.width_s = format!("{:.1}", material.width);
-    material.height_s = format!("{:.1}", material.height);
-    material.thickness_s = format!("{:.1}", material.thickness);
-    material.offset_x_s = format!("{:.1}", material.offset_x);
-    material.offset_y_s = format!("{:.1}", material.offset_y);
 }
 
 fn job_section(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState, jstate: &JobState) {

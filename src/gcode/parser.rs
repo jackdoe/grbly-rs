@@ -205,7 +205,7 @@ impl Parser {
     }
 }
 
-fn arc_center_from_radius(start: Vec3, end: Vec3, radius: f32, clockwise: bool) -> Vec3 {
+pub(crate) fn arc_center_from_radius(start: Vec3, end: Vec3, radius: f32, clockwise: bool) -> Vec3 {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let chord = (dx * dx + dy * dy).sqrt();
@@ -244,6 +244,31 @@ fn arc_center_from_radius(start: Vec3, end: Vec3, radius: f32, clockwise: bool) 
         .unwrap_or(start)
 }
 
+pub(crate) fn tessellate_arc_points(
+    start: Vec3,
+    end: Vec3,
+    center: Vec3,
+    clockwise: bool,
+) -> Vec<Vec3> {
+    let total_angle = arc_sweep(start, end, center, clockwise);
+    let start_angle = ((start.y - center.y) as f64).atan2((start.x - center.x) as f64);
+    let step_size = 2.0 * std::f64::consts::PI / 36.0;
+    let steps = ((total_angle.abs() / step_size).max(1.0)) as usize;
+    let radius =
+        (((start.x - center.x) as f64).powi(2) + ((start.y - center.y) as f64).powi(2)).sqrt();
+    let mut pts = Vec::with_capacity(steps);
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let angle = start_angle + t * total_angle;
+        pts.push(Vec3 {
+            x: center.x + (radius * angle.cos()) as f32,
+            y: center.y + (radius * angle.sin()) as f32,
+            z: start.z + (t as f32) * (end.z - start.z),
+        });
+    }
+    pts
+}
+
 fn tessellate_arc(
     start: Vec3,
     end: Vec3,
@@ -251,25 +276,10 @@ fn tessellate_arc(
     clockwise: bool,
     line: usize,
 ) -> Vec<Segment> {
-    let total_angle = arc_sweep(start, end, center, clockwise);
-
-    let start_angle = ((start.y - center.y) as f64).atan2((start.x - center.x) as f64);
-
-    let step_size = 2.0 * std::f64::consts::PI / 36.0;
-    let steps = ((total_angle.abs() / step_size).max(1.0)) as usize;
-    let radius =
-        (((start.x - center.x) as f64).powi(2) + ((start.y - center.y) as f64).powi(2)).sqrt();
-
-    let mut segs = Vec::with_capacity(steps);
+    let pts = tessellate_arc_points(start, end, center, clockwise);
+    let mut segs = Vec::with_capacity(pts.len());
     let mut prev = start;
-    for i in 1..=steps {
-        let t = i as f64 / steps as f64;
-        let angle = start_angle + t * total_angle;
-        let pt = Vec3 {
-            x: center.x + (radius * angle.cos()) as f32,
-            y: center.y + (radius * angle.sin()) as f32,
-            z: start.z + (t as f32) * (end.z - start.z),
-        };
+    for pt in pts {
         segs.push(Segment {
             start: prev,
             end: pt,

@@ -9,6 +9,7 @@ pub enum ResponseType {
     Msg,
     Setting,
     Welcome,
+    Probe,
     Unknown,
 }
 
@@ -33,6 +34,11 @@ pub struct Response {
     pub message: String,
     pub setting_num: i32,
     pub setting_val: f32,
+    pub prb: Vec3,
+    pub has_prb: bool,
+    pub probe_ok: bool,
+    pub pins: String,
+    pub has_pins: bool,
 }
 
 impl Default for Response {
@@ -56,6 +62,11 @@ impl Default for Response {
             message: String::new(),
             setting_num: 0,
             setting_val: 0.0,
+            prb: Vec3::default(),
+            has_prb: false,
+            probe_ok: false,
+            pins: String::new(),
+            has_pins: false,
         }
     }
 }
@@ -90,6 +101,17 @@ pub fn parse_response(line: &str) -> Response {
             message: inner.to_string(),
             ..Default::default()
         };
+    }
+    if let Some(inner) = line.strip_prefix("[PRB:").and_then(|s| s.strip_suffix(']')) {
+        if let Some((coords, status)) = inner.rsplit_once(':') {
+            return Response {
+                resp_type: ResponseType::Probe,
+                prb: parse_vec3(coords),
+                has_prb: true,
+                probe_ok: status.trim() == "1",
+                ..Default::default()
+            };
+        }
     }
     if line.starts_with("Grbl ") {
         return Response {
@@ -152,6 +174,10 @@ fn parse_status(s: &str) -> Response {
                         r.rapid_ovr = parts[1].parse().unwrap_or(0);
                         r.spindle_ovr = parts[2].parse().unwrap_or(0);
                     }
+                }
+                "Pn" => {
+                    r.pins = v.to_string();
+                    r.has_pins = true;
                 }
                 _ => {}
             }
@@ -251,6 +277,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_status_with_probe_pin_active() {
+        let r = parse_response("<Idle|MPos:0,0,0|FS:0,0|Pn:P>");
+        assert!(r.has_pins);
+        assert_eq!(r.pins, "P");
+    }
+
+    #[test]
+    fn parse_status_with_multiple_pins() {
+        let r = parse_response("<Idle|MPos:0,0,0|FS:0,0|Pn:XYZP>");
+        assert!(r.has_pins);
+        assert!(r.pins.contains('P'));
+        assert!(r.pins.contains('X'));
+    }
+
+    #[test]
     fn parse_status_door() {
         let r = parse_response("<Door:0|MPos:0.000,0.000,0.000,0.000|Bf:35,111|FS:0,9000>");
         assert_eq!(r.resp_type, ResponseType::Status);
@@ -290,6 +331,31 @@ mod tests {
         assert_eq!(r.resp_type, ResponseType::Setting);
         assert_eq!(r.setting_num, 20);
         assert_eq!(r.setting_val, 1.0);
+    }
+
+    #[test]
+    fn parse_probe_triggered() {
+        let r = parse_response("[PRB:12.345,67.890,-0.123:1]");
+        assert_eq!(r.resp_type, ResponseType::Probe);
+        assert!(r.has_prb);
+        assert!(r.probe_ok);
+        assert_eq!(
+            r.prb,
+            Vec3 {
+                x: 12.345,
+                y: 67.89,
+                z: -0.123,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_probe_missed() {
+        let r = parse_response("[PRB:0.000,0.000,-2.000:0]");
+        assert_eq!(r.resp_type, ResponseType::Probe);
+        assert!(r.has_prb);
+        assert!(!r.probe_ok);
+        assert_eq!(r.prb.z, -2.0);
     }
 
     #[test]
