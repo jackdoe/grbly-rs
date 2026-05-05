@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
@@ -38,6 +39,59 @@ impl std::fmt::Display for ProbeError {
             ProbeError::NotConnected => write!(f, "machine not connected"),
         }
     }
+}
+
+pub(crate) struct SleepInhibitor {
+    child: Option<Child>,
+}
+
+impl SleepInhibitor {
+    pub(crate) fn new(reason: &str) -> Self {
+        Self {
+            child: spawn_inhibitor(reason),
+        }
+    }
+}
+
+impl Drop for SleepInhibitor {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            drop(c.stdin.take());
+            let _ = c.wait();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_inhibitor(reason: &str) -> Option<Child> {
+    Command::new("systemd-inhibit")
+        .args([
+            "--what=sleep:idle",
+            "--who=grbly",
+            &format!("--why={reason}"),
+            "cat",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_inhibitor(_reason: &str) -> Option<Child> {
+    Command::new("caffeinate")
+        .args(["-dis", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn spawn_inhibitor(_reason: &str) -> Option<Child> {
+    None
 }
 
 struct SendQueue {
@@ -408,8 +462,12 @@ impl Engine {
             j.status = JobStatus::Running;
             j.current_line = 0;
         }
+        let inhibitor = SleepInhibitor::new("CNC job running");
         let engine = self.clone();
-        std::thread::spawn(move || engine.stream_job());
+        std::thread::spawn(move || {
+            engine.stream_job();
+            drop(inhibitor);
+        });
     }
 
     pub fn pause_job(&self) {

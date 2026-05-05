@@ -6,7 +6,7 @@ use std::thread;
 use parking_lot::{Mutex, RwLock};
 use three_d::egui;
 
-use crate::grbl::engine::Engine;
+use crate::grbl::engine::{Engine, SleepInhibitor};
 use crate::grbl::heightmap::{self, grid_point, HeightMap};
 use crate::grbl::state::{JobState, JobStatus, MachineState, Status};
 
@@ -587,6 +587,7 @@ fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
     let skipped = state.skipped.clone();
 
     thread::spawn(move || {
+        let _inhibitor = SleepInhibitor::new("CNC autoprobe running");
         for idx in 0..total {
             if cancel.load(Ordering::Relaxed) {
                 let mut sh = shared.lock();

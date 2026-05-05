@@ -45,6 +45,7 @@ There's also a single-point `PROBE HERE` button for spot-checks and a `PROBE →
 - Jog and setup controls are disabled when the machine is disconnected or in an incompatible GRBL state.
 - Soft-limit checks use GRBL travel settings `$130`, `$131`, `$132`, WCO, and `$20`.
 - This is still a hobby controller; verify motion on your machine before trusting unattended cuts.
+- Sleep is automatically inhibited while a job streams or grid auto-probe runs — `systemd-inhibit --what=sleep:idle` on Linux, `caffeinate -dis` on macOS. The lock is held by a child process whose lifetime is tied to ours via a stdin pipe, so abrupt exits release it cleanly. If the machine ends up in `[ HOLD ]` anyway (stray serial byte on suspend, manual feed-hold), the `RESUME` button next to the status display sends `~` (cycle start) to recover.
 
 ## Known Limits
 

@@ -93,7 +93,7 @@ pub fn draw(
                 ui.set_min_width(ui.available_width());
                 connection_section(ui, engine, mstate, ui_state);
                 ui.separator();
-                machine_readout(ui, mstate);
+                machine_readout(ui, engine, mstate);
                 draw_notice(ui, ui_state);
                 ui.separator();
                 tab_bar(ui, ui_state);
@@ -182,14 +182,26 @@ fn connection_section(
     });
 }
 
-fn machine_readout(ui: &mut egui::Ui, mstate: &MachineState) {
+fn machine_readout(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState) {
     let (color, text) = status_display(mstate.status);
-    ui.label(
-        egui::RichText::new(format!("[ {} ]", text))
-            .size(20.0)
-            .color(color)
-            .strong(),
-    );
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("[ {} ]", text))
+                .size(20.0)
+                .color(color)
+                .strong(),
+        );
+        if matches!(mstate.status, Status::Hold | Status::Door) {
+            let resume = egui::Button::new(
+                egui::RichText::new("RESUME").size(13.0).color(GREEN).strong(),
+            )
+            .fill(egui::Color32::from_rgb(0x11, 0x33, 0x11))
+            .min_size(egui::vec2(80.0, 28.0));
+            if ui.add(resume).clicked() {
+                engine.resume();
+            }
+        }
+    });
     ui.add_space(4.0);
     ui.label(egui::RichText::new("WORK").size(11.0).color(DIM));
     position_row(ui, mstate.wpos, 18.0);
