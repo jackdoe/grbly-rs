@@ -236,8 +236,9 @@ fn build_probe_preview(jstate: &JobState, probe: &ProbeState) -> Option<ProbePre
     if !bbox_valid {
         return None;
     }
-    let (bbox_min, bbox_max, gx, gy, samples, current_index) =
+    let (bbox_min, bbox_max, gx, gy, samples, current_index, skipped) =
         if let Some(map) = &jstate.heightmap {
+            let total = (map.grid_x * map.grid_y) as usize;
             (
                 map.bbox_min,
                 map.bbox_max,
@@ -245,9 +246,10 @@ fn build_probe_preview(jstate: &JobState, probe: &ProbeState) -> Option<ProbePre
                 map.grid_y,
                 Some(map.z.iter().map(|z| Some(*z)).collect()),
                 None,
+                vec![false; total],
             )
         } else {
-            let (s, ci) = probe.samples_snapshot();
+            let (s, ci, skip) = probe.samples_snapshot();
             (
                 (jstate.bounds_min.x, jstate.bounds_min.y),
                 (jstate.bounds_max.x, jstate.bounds_max.y),
@@ -255,6 +257,7 @@ fn build_probe_preview(jstate: &JobState, probe: &ProbeState) -> Option<ProbePre
                 probe.grid_y,
                 if s.is_empty() { None } else { Some(s) },
                 ci,
+                skip,
             )
         };
     Some(ProbePreview {
@@ -264,6 +267,7 @@ fn build_probe_preview(jstate: &JobState, probe: &ProbeState) -> Option<ProbePre
         grid_y: gy,
         samples,
         current_index,
+        skipped,
     })
 }
 

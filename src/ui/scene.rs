@@ -11,6 +11,7 @@ pub struct ProbePreview {
     pub grid_y: u32,
     pub samples: Option<Vec<Option<f32>>>,
     pub current_index: Option<usize>,
+    pub skipped: Vec<bool>,
 }
 
 pub struct Scene {
@@ -41,6 +42,7 @@ struct ProbeSignature {
     grid_y: u32,
     samples: Vec<Option<f32>>,
     current_index: Option<usize>,
+    skipped: Vec<bool>,
 }
 
 pub struct SceneUpdate<'a> {
@@ -194,6 +196,7 @@ impl Scene {
                 grid_y: p.grid_y,
                 samples: p.samples.clone().unwrap_or_default(),
                 current_index: p.current_index,
+                skipped: p.skipped.clone(),
             },
         };
         if new_sig != self.last_probe_signature {
@@ -464,13 +467,21 @@ fn build_probe_points(context: &Context, p: &ProbePreview) -> Option<Gm<Mesh, Co
     let pending = Srgba::new(0xff, 0xaa, 0x00, 0xcc);
     let probed = Srgba::new(0x00, 0xff, 0x88, 0xff);
     let active = Srgba::new(0x00, 0xcc, 0xff, 0xff);
+    let skipped = Srgba::new(0xff, 0x33, 0x33, 0xff);
     for idx in 0..total {
         let (x, y) = grid_point(p.bbox_min, p.bbox_max, p.grid_x, p.grid_y, idx);
+        let is_skipped = p.skipped.get(idx).copied().unwrap_or(false);
         let sample_z = p
             .samples
             .as_ref()
             .and_then(|s| s.get(idx).copied().flatten());
         let z = sample_z.unwrap_or(0.0);
+        let r = if Some(idx) == p.current_index { 2.5 } else { 1.5 };
+        if is_skipped {
+            lb.add(V3 { x: x - r, y: y - r, z }, V3 { x: x + r, y: y + r, z }, skipped, LINE_W);
+            lb.add(V3 { x: x - r, y: y + r, z }, V3 { x: x + r, y: y - r, z }, skipped, LINE_W);
+            continue;
+        }
         let color = if Some(idx) == p.current_index {
             active
         } else if sample_z.is_some() {
@@ -478,25 +489,9 @@ fn build_probe_points(context: &Context, p: &ProbePreview) -> Option<Gm<Mesh, Co
         } else {
             pending
         };
-        let r = if Some(idx) == p.current_index { 2.0 } else { 1.5 };
-        lb.add(
-            V3 { x: x - r, y, z },
-            V3 { x: x + r, y, z },
-            color,
-            LINE_W,
-        );
-        lb.add(
-            V3 { x, y: y - r, z },
-            V3 { x, y: y + r, z },
-            color,
-            LINE_W,
-        );
-        lb.add(
-            V3 { x, y, z: z - 0.5 },
-            V3 { x, y, z: z + 1.5 },
-            color,
-            GRID_W,
-        );
+        lb.add(V3 { x: x - r, y, z }, V3 { x: x + r, y, z }, color, LINE_W);
+        lb.add(V3 { x, y: y - r, z }, V3 { x, y: y + r, z }, color, LINE_W);
+        lb.add(V3 { x, y, z: z - 0.5 }, V3 { x, y, z: z + 1.5 }, color, GRID_W);
     }
     Some(lb.build(context))
 }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -7,7 +8,7 @@ use three_d::egui;
 
 use crate::grbl::engine::Engine;
 use crate::grbl::heightmap::{self, grid_point, HeightMap};
-use crate::grbl::state::{JobState, JobStatus, MachineState, Status, Vec3};
+use crate::grbl::state::{JobState, JobStatus, MachineState, Status};
 
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
 const DIM: egui::Color32 = egui::Color32::from_rgb(0x88, 0x77, 0x44);
@@ -45,6 +46,7 @@ struct ProbeShared {
 pub struct ProbeState {
     pub grid_x: u32,
     pub grid_y: u32,
+    pub skipped: HashSet<usize>,
     safe_z: f32,
     max_depth: f32,
     probe_feed: f32,
@@ -58,14 +60,16 @@ pub struct ProbeState {
 }
 
 impl ProbeState {
-    pub fn samples_snapshot(&self) -> (Vec<Option<f32>>, Option<usize>) {
+    pub fn samples_snapshot(&self) -> (Vec<Option<f32>>, Option<usize>, Vec<bool>) {
         let sh = self.shared.lock();
         let cur = if self.phase == ProbePhase::Grid {
             Some(sh.current_index)
         } else {
             None
         };
-        (sh.samples.clone(), cur)
+        let total = (self.grid_x * self.grid_y) as usize;
+        let skipped: Vec<bool> = (0..total).map(|i| self.skipped.contains(&i)).collect();
+        (sh.samples.clone(), cur, skipped)
     }
 }
 
@@ -74,6 +78,7 @@ impl Default for ProbeState {
         Self {
             grid_x: 5,
             grid_y: 5,
+            skipped: HashSet::new(),
             safe_z: 1.0,
             max_depth: 0.3,
             probe_feed: 50.0,
@@ -196,37 +201,45 @@ fn single_probe(
             .fill(egui::Color32::from_rgb(0x00, 0x22, 0x33))
             .min_size(egui::vec2(0.0, 26.0));
         if cols[0].add_enabled(can_probe, probe_btn).clicked() {
-            spawn_single_probe(engine.clone(), mstate.wpos, state, false);
+            spawn_single_probe(engine.clone(), state, false);
         }
         let zero_btn =
             egui::Button::new(egui::RichText::new("PROBE → ZERO Z").size(12.0).color(GREEN))
                 .fill(egui::Color32::from_rgb(0x00, 0x33, 0x11))
                 .min_size(egui::vec2(0.0, 26.0));
         if cols[1].add_enabled(can_probe, zero_btn).clicked() {
-            spawn_single_probe(engine.clone(), mstate.wpos, state, true);
+            spawn_single_probe(engine.clone(), state, true);
         }
     });
 
-    let sh = state.shared.lock();
-    if let Some(z) = sh.single_z {
+    let (last_z, last_msg) = {
+        let sh = state.shared.lock();
+        (sh.single_z, sh.single_msg.clone())
+    };
+    if let Some(z) = last_z {
         ui.label(
             egui::RichText::new(format!("last probe: Z = {:.3} mm", z))
                 .size(11.0)
                 .color(WHITE),
         );
+        let set_btn =
+            egui::Button::new(egui::RichText::new("SET Z0 HERE").size(12.0).color(GREEN))
+                .fill(egui::Color32::from_rgb(0x00, 0x33, 0x11))
+                .min_size(egui::vec2(ui.available_width(), 24.0));
+        if ui.add_enabled(can_probe, set_btn).clicked() {
+            engine.send(&format!("G10 L20 P1 Z{:.4}", mstate.wpos.z - z));
+            let mut sh = state.shared.lock();
+            sh.single_z = None;
+            sh.single_msg = format!("Z0 set at probed surface (was Z={:.3})", z);
+        }
     }
-    if !sh.single_msg.is_empty() {
-        let color = if sh.single_z.is_some() { GREEN } else { AMBER };
-        ui.label(egui::RichText::new(&sh.single_msg).size(11.0).color(color));
+    if !last_msg.is_empty() {
+        let color = if last_z.is_some() { GREEN } else { AMBER };
+        ui.label(egui::RichText::new(&last_msg).size(11.0).color(color));
     }
 }
 
-fn spawn_single_probe(
-    engine: Arc<Engine>,
-    wpos: Vec3,
-    state: &mut ProbeState,
-    zero_after: bool,
-) {
+fn spawn_single_probe(engine: Arc<Engine>, state: &mut ProbeState, zero_after: bool) {
     state.phase = ProbePhase::Single;
     {
         let mut sh = state.shared.lock();
@@ -235,28 +248,28 @@ fn spawn_single_probe(
         sh.finished = false;
     }
     let shared = state.shared.clone();
-    let safe_z = state.safe_z;
     let max_depth = state.max_depth;
     let feed = state.probe_feed;
     thread::spawn(move || {
-        let result = engine.probe_at(wpos.x, wpos.y, safe_z, max_depth, feed);
+        let result = engine.probe_here(max_depth, feed);
+        let mut sh = shared.lock();
         match result {
             Ok(z) => {
                 if zero_after {
-                    engine.send(&format!("G10 L20 P1 Z{:.4}", safe_z - z));
+                    drop(sh);
+                    let current_z = engine.state.read().wpos.z;
+                    engine.send(&format!("G10 L20 P1 Z{:.4}", current_z - z));
                     let mut sh = shared.lock();
                     sh.single_z = Some(z);
                     sh.single_msg = format!("zeroed Z at probed surface (was {:.3})", z);
                     sh.finished = true;
                 } else {
-                    let mut sh = shared.lock();
                     sh.single_z = Some(z);
                     sh.single_msg = format!("probed Z = {:.3} mm", z);
                     sh.finished = true;
                 }
             }
             Err(e) => {
-                let mut sh = shared.lock();
                 sh.single_z = None;
                 sh.single_msg = format!("probe failed: {e}");
                 sh.finished = true;
@@ -272,25 +285,44 @@ fn grid_section(
     jstate: &JobState,
     state: &mut ProbeState,
 ) {
+    let mut grid_changed = false;
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("grid").size(11.0).color(DIM));
-        ui.add(
-            egui::DragValue::new(&mut state.grid_x)
-                .range(2..=10)
-                .speed(1.0),
-        );
+        if ui
+            .add(
+                egui::DragValue::new(&mut state.grid_x)
+                    .range(2..=10)
+                    .speed(1.0),
+            )
+            .changed()
+        {
+            grid_changed = true;
+        }
         ui.label(egui::RichText::new("×").size(11.0).color(DIM));
-        ui.add(
-            egui::DragValue::new(&mut state.grid_y)
-                .range(2..=10)
-                .speed(1.0),
-        );
+        if ui
+            .add(
+                egui::DragValue::new(&mut state.grid_y)
+                    .range(2..=10)
+                    .speed(1.0),
+            )
+            .changed()
+        {
+            grid_changed = true;
+        }
+        let active = (state.grid_x * state.grid_y) as usize - state.skipped.len();
         ui.label(
-            egui::RichText::new(format!("= {} pts", state.grid_x * state.grid_y))
-                .size(11.0)
-                .color(DIM),
+            egui::RichText::new(format!(
+                "= {} pts ({} active)",
+                state.grid_x * state.grid_y,
+                active
+            ))
+            .size(11.0)
+            .color(DIM),
         );
     });
+    if grid_changed {
+        state.skipped.clear();
+    }
 
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("mode").size(11.0).color(DIM));
@@ -319,6 +351,7 @@ fn grid_section(
             .size(11.0)
             .color(DIM),
         );
+        grid_widget(ui, state);
     } else {
         ui.label(
             egui::RichText::new("load gcode to define probe bbox")
@@ -499,14 +532,45 @@ fn start_grid(state: &mut ProbeState, engine: &Arc<Engine>, jstate: &JobState) {
     state.phase = ProbePhase::Grid;
     match state.mode {
         ProbeMode::Auto => spawn_auto(state, engine.clone()),
-        ProbeMode::Manual => {
-            let (x, y) = grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, 0);
-            engine.send(&format!(
-                "G90 G21 G0 X{:.3} Y{:.3} Z{:.3}",
-                x, y, state.safe_z
-            ));
-        }
+        ProbeMode::Manual => match next_unskipped(state, 0) {
+            Some(first) => {
+                state.shared.lock().current_index = first;
+                let (x, y) =
+                    grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, first);
+                engine.send(&format!(
+                    "G90 G21 G0 X{:.3} Y{:.3} Z{:.3}",
+                    x, y, state.safe_z
+                ));
+            }
+            None => {
+                let mut sh = state.shared.lock();
+                sh.error = "all points skipped".into();
+                sh.finished = true;
+            }
+        },
     }
+}
+
+fn next_unskipped(state: &ProbeState, from: usize) -> Option<usize> {
+    let total = grid_total(state);
+    (from..total).find(|i| !state.skipped.contains(i))
+}
+
+fn fill_skipped(samples: &[Option<f32>], skipped: &HashSet<usize>) -> Option<Vec<f32>> {
+    let probed: Vec<f32> = samples
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| if skipped.contains(&i) { None } else { *s })
+        .collect();
+    if probed.is_empty() {
+        return None;
+    }
+    let avg = probed.iter().sum::<f32>() / probed.len() as f32;
+    let needs_all = samples.iter().enumerate().all(|(i, s)| skipped.contains(&i) || s.is_some());
+    if !needs_all {
+        return None;
+    }
+    Some(samples.iter().map(|s| s.unwrap_or(avg)).collect())
 }
 
 fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
@@ -520,6 +584,7 @@ fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
     let safe_z = state.safe_z;
     let max_depth = state.max_depth;
     let feed = state.probe_feed;
+    let skipped = state.skipped.clone();
 
     thread::spawn(move || {
         for idx in 0..total {
@@ -528,6 +593,9 @@ fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
                 sh.error = "cancelled".into();
                 sh.finished = true;
                 return;
+            }
+            if skipped.contains(&idx) {
+                continue;
             }
             shared.lock().current_index = idx;
 
@@ -549,23 +617,75 @@ fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
     });
 }
 
+fn grid_widget(ui: &mut egui::Ui, state: &mut ProbeState) {
+    let (samples, current_idx) = {
+        let sh = state.shared.lock();
+        let cur = if state.phase == ProbePhase::Grid {
+            Some(sh.current_index)
+        } else {
+            None
+        };
+        (sh.samples.clone(), cur)
+    };
+    let allow_toggle = state.phase == ProbePhase::Idle;
+    let cell_size = 22.0_f32;
+    ui.label(
+        egui::RichText::new("click to skip / unskip (clamp here)")
+            .size(10.0)
+            .color(DIM),
+    );
+    for j in (0..state.grid_y).rev() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for i in 0..state.grid_x {
+                let idx = (j * state.grid_x + i) as usize;
+                let is_skipped = state.skipped.contains(&idx);
+                let probed_z = samples.get(idx).copied().flatten();
+                let is_active = current_idx == Some(idx);
+                let (fill, glyph) = if is_skipped {
+                    (egui::Color32::from_rgb(0x66, 0x11, 0x11), "X")
+                } else if is_active {
+                    (egui::Color32::from_rgb(0x00, 0x33, 0x55), "·")
+                } else if probed_z.is_some() {
+                    (egui::Color32::from_rgb(0x11, 0x44, 0x22), "·")
+                } else {
+                    (egui::Color32::from_rgb(0x33, 0x2a, 0x00), "·")
+                };
+                let text_color = if is_skipped { RED } else { WHITE };
+                let btn =
+                    egui::Button::new(egui::RichText::new(glyph).size(11.0).color(text_color))
+                        .fill(fill)
+                        .min_size(egui::vec2(cell_size, cell_size));
+                if ui.add_enabled(allow_toggle, btn).clicked() {
+                    if is_skipped {
+                        state.skipped.remove(&idx);
+                    } else {
+                        state.skipped.insert(idx);
+                    }
+                }
+            }
+        });
+    }
+}
+
 fn retract(engine: &Arc<Engine>, safe_z: f32) {
     engine.send(&format!("G90 G21 G0 Z{:.3}", safe_z));
 }
 
 fn advance_manual(state: &mut ProbeState, engine: &Arc<Engine>, mstate: &MachineState) {
-    let total = grid_total(state);
     let idx = state.shared.lock().current_index;
     state.shared.lock().samples[idx] = Some(mstate.wpos.z);
     retract(engine, state.safe_z);
-    let next = idx + 1;
-    if next >= total {
-        state.shared.lock().finished = true;
-        return;
+    match next_unskipped(state, idx + 1) {
+        Some(next) => {
+            state.shared.lock().current_index = next;
+            let (x, y) = grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, next);
+            engine.send(&format!("G90 G21 G0 X{:.3} Y{:.3}", x, y));
+        }
+        None => {
+            state.shared.lock().finished = true;
+        }
     }
-    state.shared.lock().current_index = next;
-    let (x, y) = grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, next);
-    engine.send(&format!("G90 G21 G0 X{:.3} Y{:.3}", x, y));
 }
 
 fn abort_manual(state: &mut ProbeState, engine: &Arc<Engine>) {
@@ -582,8 +702,7 @@ fn poll_completion(state: &mut ProbeState, job_lock: &Arc<RwLock<JobState>>) {
 
     if state.phase == ProbePhase::Grid {
         let samples = state.shared.lock().samples.clone();
-        if !samples.is_empty() && samples.iter().all(|s| s.is_some()) {
-            let z: Vec<f32> = samples.iter().map(|s| s.unwrap()).collect();
+        if let Some(z) = fill_skipped(&samples, &state.skipped) {
             if let Ok(map) = HeightMap::new(
                 state.bbox_min,
                 state.bbox_max,

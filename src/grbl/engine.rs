@@ -495,6 +495,28 @@ impl Engine {
         max_depth: f32,
         feed: f32,
     ) -> Result<f32, ProbeError> {
+        self.guarded_probe(
+            Some((x, y)),
+            safe_z,
+            -max_depth,
+            safe_z,
+            feed,
+        )
+    }
+
+    pub fn probe_here(&self, max_depth: f32, feed: f32) -> Result<f32, ProbeError> {
+        let start_z = self.state.read().wpos.z;
+        self.guarded_probe(None, start_z, start_z - max_depth, start_z, feed)
+    }
+
+    fn guarded_probe(
+        &self,
+        rapid_xy: Option<(f32, f32)>,
+        rapid_z: f32,
+        target_z: f32,
+        retract_z: f32,
+        feed: f32,
+    ) -> Result<f32, ProbeError> {
         if !self.state.read().connected {
             return Err(ProbeError::NotConnected);
         }
@@ -505,15 +527,17 @@ impl Engine {
         let (tx, rx) = mpsc::channel::<ProbeReply>();
         *self.pipe.probe_result_tx.lock() = Some(tx);
 
+        if let Some((x, y)) = rapid_xy {
+            self.pipe
+                .send(&format!("G90 G21 G0 X{:.3} Y{:.3} Z{:.3}", x, y, rapid_z));
+        }
         self.pipe
-            .send(&format!("G90 G21 G0 X{:.3} Y{:.3} Z{:.3}", x, y, safe_z));
-        self.pipe
-            .send(&format!("G38.3 Z-{:.3} F{:.1}", max_depth, feed));
+            .send(&format!("G38.3 Z{:.4} F{:.1}", target_z, feed));
 
         let result = rx.recv_timeout(Duration::from_secs(60));
         *self.pipe.probe_result_tx.lock() = None;
 
-        self.pipe.send(&format!("G90 G21 G0 Z{:.3}", safe_z));
+        self.pipe.send(&format!("G90 G21 G0 Z{:.3}", retract_z));
         self.probe_in_flight.store(false, Ordering::Release);
 
         let reply = result.map_err(|_| ProbeError::Timeout)?;
