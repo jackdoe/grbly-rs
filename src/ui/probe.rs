@@ -6,7 +6,7 @@ use parking_lot::{Mutex, RwLock};
 use three_d::egui;
 
 use crate::grbl::engine::Engine;
-use crate::grbl::heightmap::{self, HeightMap};
+use crate::grbl::heightmap::{self, grid_point, HeightMap};
 use crate::grbl::state::{JobState, JobStatus, MachineState, Status, Vec3};
 
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
@@ -29,9 +29,7 @@ pub enum ProbePhase {
     #[default]
     Idle,
     Single,
-    Auto,
-    Manual,
-    Done,
+    Grid,
 }
 
 #[derive(Default)]
@@ -47,14 +45,14 @@ struct ProbeShared {
 pub struct ProbeState {
     pub grid_x: u32,
     pub grid_y: u32,
-    pub safe_z: f32,
-    pub max_depth: f32,
-    pub probe_feed: f32,
-    pub mode: ProbeMode,
-    pub phase: ProbePhase,
-    pub bbox_min: (f32, f32),
-    pub bbox_max: (f32, f32),
-    pub manual_jog_step: f32,
+    safe_z: f32,
+    max_depth: f32,
+    probe_feed: f32,
+    mode: ProbeMode,
+    phase: ProbePhase,
+    bbox_min: (f32, f32),
+    bbox_max: (f32, f32),
+    manual_jog_step: f32,
     cancel: Arc<AtomicBool>,
     shared: Arc<Mutex<ProbeShared>>,
 }
@@ -62,8 +60,11 @@ pub struct ProbeState {
 impl ProbeState {
     pub fn samples_snapshot(&self) -> (Vec<Option<f32>>, Option<usize>) {
         let sh = self.shared.lock();
-        let in_progress = matches!(self.phase, ProbePhase::Auto | ProbePhase::Manual);
-        let cur = if in_progress { Some(sh.current_index) } else { None };
+        let cur = if self.phase == ProbePhase::Grid {
+            Some(sh.current_index)
+        } else {
+            None
+        };
         (sh.samples.clone(), cur)
     }
 }
@@ -89,17 +90,6 @@ impl Default for ProbeState {
 
 fn grid_total(s: &ProbeState) -> usize {
     s.grid_x as usize * s.grid_y as usize
-}
-
-fn grid_xy(bbox_min: (f32, f32), bbox_max: (f32, f32), gx: u32, gy: u32, idx: usize) -> (f32, f32) {
-    let i = (idx % gx as usize) as u32;
-    let j = (idx / gx as usize) as u32;
-    let fx = i as f32 / (gx - 1).max(1) as f32;
-    let fy = j as f32 / (gy - 1).max(1) as f32;
-    (
-        bbox_min.0 + fx * (bbox_max.0 - bbox_min.0),
-        bbox_min.1 + fy * (bbox_max.1 - bbox_min.1),
-    )
 }
 
 pub fn draw(
@@ -197,7 +187,7 @@ fn single_probe(
     mstate: &MachineState,
     state: &mut ProbeState,
 ) {
-    let busy = state.phase != ProbePhase::Idle && state.phase != ProbePhase::Done;
+    let busy = state.phase != ProbePhase::Idle;
     let can_probe =
         mstate.connected && matches!(mstate.status, Status::Idle | Status::Jog) && !busy;
 
@@ -337,18 +327,20 @@ fn grid_section(
         );
     }
 
-    let busy = state.phase == ProbePhase::Auto
-        || state.phase == ProbePhase::Manual
-        || state.phase == ProbePhase::Single;
     let can_start = mstate.connected
         && mstate.status == Status::Idle
         && jstate.status != JobStatus::Running
         && jstate.status != JobStatus::Paused
         && bbox_valid
-        && !busy;
+        && state.phase == ProbePhase::Idle;
+
+    let err = state.shared.lock().error.clone();
+    if !err.is_empty() {
+        ui.label(egui::RichText::new(&err).size(11.0).color(RED));
+    }
 
     match state.phase {
-        ProbePhase::Idle | ProbePhase::Done | ProbePhase::Single => {
+        ProbePhase::Idle | ProbePhase::Single => {
             let label = match state.mode {
                 ProbeMode::Auto => "START PROBE (AUTO)",
                 ProbeMode::Manual => "START PROBE (MANUAL)",
@@ -373,18 +365,20 @@ fn grid_section(
                 );
             }
         }
-        ProbePhase::Auto => {
+        ProbePhase::Grid => {
             grid_progress(ui, state);
-            let abort = egui::Button::new(egui::RichText::new("ABORT").size(12.0).color(RED))
-                .fill(egui::Color32::from_rgb(0x33, 0x11, 0x11))
-                .min_size(egui::vec2(ui.available_width(), 24.0));
-            if ui.add(abort).clicked() {
-                state.cancel.store(true, Ordering::Relaxed);
+            match state.mode {
+                ProbeMode::Auto => {
+                    let abort =
+                        egui::Button::new(egui::RichText::new("ABORT").size(12.0).color(RED))
+                            .fill(egui::Color32::from_rgb(0x33, 0x11, 0x11))
+                            .min_size(egui::vec2(ui.available_width(), 24.0));
+                    if ui.add(abort).clicked() {
+                        state.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+                ProbeMode::Manual => manual_controls(ui, engine, mstate, state),
             }
-        }
-        ProbePhase::Manual => {
-            grid_progress(ui, state);
-            manual_controls(ui, engine, mstate, state);
         }
     }
 }
@@ -393,7 +387,7 @@ fn grid_progress(ui: &mut egui::Ui, state: &ProbeState) {
     let sh = state.shared.lock();
     let total = grid_total(state);
     let i = sh.current_index.min(total.saturating_sub(1));
-    let (x, y) = grid_xy(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, i);
+    let (x, y) = grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, i);
     ui.label(
         egui::RichText::new(format!(
             "probing {}/{} at ({:.2}, {:.2})",
@@ -405,9 +399,6 @@ fn grid_progress(ui: &mut egui::Ui, state: &ProbeState) {
         .size(11.0)
         .color(WHITE),
     );
-    if !sh.error.is_empty() {
-        ui.label(egui::RichText::new(&sh.error).size(11.0).color(RED));
-    }
 }
 
 fn manual_controls(
@@ -505,14 +496,11 @@ fn start_grid(state: &mut ProbeState, engine: &Arc<Engine>, jstate: &JobState) {
         sh.finished = false;
     }
 
+    state.phase = ProbePhase::Grid;
     match state.mode {
-        ProbeMode::Auto => {
-            state.phase = ProbePhase::Auto;
-            spawn_auto(state, engine.clone());
-        }
+        ProbeMode::Auto => spawn_auto(state, engine.clone()),
         ProbeMode::Manual => {
-            state.phase = ProbePhase::Manual;
-            let (x, y) = grid_xy(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, 0);
+            let (x, y) = grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, 0);
             engine.send(&format!(
                 "G90 G21 G0 X{:.3} Y{:.3} Z{:.3}",
                 x, y, state.safe_z
@@ -543,7 +531,7 @@ fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
             }
             shared.lock().current_index = idx;
 
-            let (x, y) = grid_xy(bbox_min, bbox_max, grid_x, grid_y, idx);
+            let (x, y) = grid_point(bbox_min, bbox_max, grid_x, grid_y, idx);
 
             match engine.probe_at(x, y, safe_z, max_depth, feed) {
                 Ok(z) => {
@@ -561,28 +549,29 @@ fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
     });
 }
 
+fn retract(engine: &Arc<Engine>, safe_z: f32) {
+    engine.send(&format!("G90 G21 G0 Z{:.3}", safe_z));
+}
+
 fn advance_manual(state: &mut ProbeState, engine: &Arc<Engine>, mstate: &MachineState) {
     let total = grid_total(state);
     let idx = state.shared.lock().current_index;
     state.shared.lock().samples[idx] = Some(mstate.wpos.z);
+    retract(engine, state.safe_z);
     let next = idx + 1;
     if next >= total {
-        engine.send(&format!("G90 G21 G0 Z{:.3}", state.safe_z));
         state.shared.lock().finished = true;
         return;
     }
     state.shared.lock().current_index = next;
-    let (x, y) = grid_xy(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, next);
-    engine.send(&format!("G90 G21 G0 Z{:.3}", state.safe_z));
+    let (x, y) = grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, next);
     engine.send(&format!("G90 G21 G0 X{:.3} Y{:.3}", x, y));
 }
 
 fn abort_manual(state: &mut ProbeState, engine: &Arc<Engine>) {
-    engine.send(&format!("G90 G21 G0 Z{:.3}", state.safe_z));
+    retract(engine, state.safe_z);
     state.cancel.store(true, Ordering::Relaxed);
-    let mut sh = state.shared.lock();
-    sh.error = "aborted".into();
-    sh.finished = true;
+    state.shared.lock().finished = true;
 }
 
 fn poll_completion(state: &mut ProbeState, job_lock: &Arc<RwLock<JobState>>) {
@@ -591,21 +580,9 @@ fn poll_completion(state: &mut ProbeState, job_lock: &Arc<RwLock<JobState>>) {
         return;
     }
 
-    if state.phase == ProbePhase::Single {
-        state.phase = ProbePhase::Idle;
-        state.shared.lock().finished = false;
-        return;
-    }
-
-    if state.phase == ProbePhase::Auto || state.phase == ProbePhase::Manual {
-        let (cancelled, samples) = {
-            let sh = state.shared.lock();
-            let cancelled = sh.error == "cancelled" || sh.error == "aborted";
-            let samples = sh.samples.clone();
-            (cancelled, samples)
-        };
-        let all_set = !samples.is_empty() && samples.iter().all(|s| s.is_some());
-        if all_set && !cancelled {
+    if state.phase == ProbePhase::Grid {
+        let samples = state.shared.lock().samples.clone();
+        if !samples.is_empty() && samples.iter().all(|s| s.is_some()) {
             let z: Vec<f32> = samples.iter().map(|s| s.unwrap()).collect();
             if let Ok(map) = HeightMap::new(
                 state.bbox_min,
@@ -620,11 +597,9 @@ fn poll_completion(state: &mut ProbeState, job_lock: &Arc<RwLock<JobState>>) {
                 j.heightmap = Some(arc);
                 j.version = j.version.wrapping_add(1);
             }
-            state.phase = ProbePhase::Done;
-        } else {
-            state.phase = ProbePhase::Idle;
         }
-        let mut sh = state.shared.lock();
-        sh.finished = false;
     }
+
+    state.phase = ProbePhase::Idle;
+    state.shared.lock().finished = false;
 }

@@ -105,7 +105,6 @@ impl SendQueue {
 
 type OnLog = Arc<Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>>;
 
-/// Shared state for the send pipeline. All serial writes go through here.
 struct SendPipe {
     queue: Mutex<SendQueue>,
     buf_ready: Condvar,
@@ -135,7 +134,6 @@ impl SendPipe {
         }
     }
 
-    /// Enqueue a line and flush what fits to serial. Non-blocking.
     fn send(&self, line: &str) {
         let line = strip_comments(line);
         if line.is_empty() {
@@ -149,7 +147,6 @@ impl SendPipe {
         self.write_to_serial(&to_send);
     }
 
-    /// Called when GRBL acks a command (ok/error). Frees buffer space and flushes.
     fn ack(&self) {
         let to_send = {
             let mut q = self.queue.lock();
@@ -161,7 +158,6 @@ impl SendPipe {
         self.write_to_serial(&to_send);
     }
 
-    /// Block until the job may enqueue `line`, then flush. Used by the job streamer.
     fn send_job_line(
         &self,
         line: &str,
@@ -204,7 +200,6 @@ impl SendPipe {
         }
     }
 
-    /// Block until all in-flight commands are ack'd.
     fn wait_job_idle(&self, should_stop: &dyn Fn() -> bool, is_paused: &dyn Fn() -> bool) -> bool {
         let mut q = self.queue.lock();
         while !q.is_idle() {
@@ -222,7 +217,6 @@ impl SendPipe {
         true
     }
 
-    /// Send a realtime character (not queued, bypasses buffer).
     fn realtime(&self, b: u8) {
         let err = {
             let mut wp = self.write_port.lock();
@@ -263,7 +257,6 @@ impl SendPipe {
         }
     }
 
-    /// The single place that writes to serial and logs sent commands.
     fn write_to_serial(&self, lines: &[String]) {
         if lines.is_empty() {
             return;

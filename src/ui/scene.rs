@@ -1,3 +1,4 @@
+use crate::grbl::heightmap::grid_point;
 use crate::grbl::state::{self, JobState, MachineState, Segment};
 use three_d::renderer::*;
 
@@ -13,14 +14,14 @@ pub struct ProbePreview {
 }
 
 pub struct Scene {
-    pub grid: Gm<Mesh, ColorMaterial>,
-    pub triad: Gm<Mesh, ColorMaterial>,
-    pub machine_box: Option<Gm<Mesh, ColorMaterial>>,
-    pub toolpath: Option<Gm<Mesh, ColorMaterial>>,
-    pub gantry: Option<Gm<Mesh, ColorMaterial>>,
-    pub trail: Option<Gm<Mesh, ColorMaterial>>,
-    pub bounds_box: Option<Gm<Mesh, ColorMaterial>>,
-    pub probe_points: Option<Gm<Mesh, ColorMaterial>>,
+    grid: Gm<Mesh, ColorMaterial>,
+    triad: Gm<Mesh, ColorMaterial>,
+    machine_box: Option<Gm<Mesh, ColorMaterial>>,
+    toolpath: Option<Gm<Mesh, ColorMaterial>>,
+    gantry: Option<Gm<Mesh, ColorMaterial>>,
+    trail: Option<Gm<Mesh, ColorMaterial>>,
+    bounds_box: Option<Gm<Mesh, ColorMaterial>>,
+    probe_points: Option<Gm<Mesh, ColorMaterial>>,
     trail_points: Vec<V3>,
     trail_dirty: bool,
     last_pos: V3,
@@ -55,7 +56,6 @@ const LINE_W: f32 = 0.3;
 const GRID_W: f32 = 0.15;
 const THICK_W: f32 = 0.5;
 
-/// Cubiko default travel extents (mm) used when $130/$131/$132 are zero
 const CUBIKO_TRAVEL_X: f32 = 150.0;
 const CUBIKO_TRAVEL_Y: f32 = 110.0;
 const CUBIKO_TRAVEL_Z: f32 = 40.0;
@@ -108,7 +108,6 @@ impl Scene {
             self.trail_dirty = true;
         }
 
-        // Gantry always updates (position changes)
         let wco = mstate.wco;
         let z_clearance = if wco.z.abs() > 0.01 { -wco.z } else { 30.0 };
         self.gantry = Some(build_gantry(context, wpos, z_clearance));
@@ -144,7 +143,6 @@ impl Scene {
             }
         }
 
-        // Update machine travel box when connection state, WCO, or travel settings change
         let mt = mstate.max_travel;
         let connected_changed = mstate.connected != self.last_connected;
         if connected_changed || wco != self.last_wco || mt != self.last_max_travel {
@@ -152,14 +150,9 @@ impl Scene {
             self.last_wco = wco;
             self.last_max_travel = mt;
             if mstate.connected {
-                // Use Cubiko defaults as fallback when max_travel axes are zero
                 let tx = if mt.x > 0.0 { mt.x } else { CUBIKO_TRAVEL_X };
                 let ty = if mt.y > 0.0 { mt.y } else { CUBIKO_TRAVEL_Y };
                 let tz = if mt.z > 0.0 { mt.z } else { CUBIKO_TRAVEL_Z };
-                // Machine travel in work coordinates:
-                // Cubiko: XY home at MPos(0,0), travel goes positive to MPos(+tx,+ty)
-                //         Z  home at MPos(0),   travel goes negative to MPos(-tz)
-                // WPos = MPos - WCO
                 let home_w = V3 {
                     x: -wco.x,
                     y: -wco.y,
@@ -472,12 +465,7 @@ fn build_probe_points(context: &Context, p: &ProbePreview) -> Option<Gm<Mesh, Co
     let probed = Srgba::new(0x00, 0xff, 0x88, 0xff);
     let active = Srgba::new(0x00, 0xcc, 0xff, 0xff);
     for idx in 0..total {
-        let i = (idx % p.grid_x as usize) as u32;
-        let j = (idx / p.grid_x as usize) as u32;
-        let fx = i as f32 / (p.grid_x - 1) as f32;
-        let fy = j as f32 / (p.grid_y - 1) as f32;
-        let x = p.bbox_min.0 + fx * (p.bbox_max.0 - p.bbox_min.0);
-        let y = p.bbox_min.1 + fy * (p.bbox_max.1 - p.bbox_min.1);
+        let (x, y) = grid_point(p.bbox_min, p.bbox_max, p.grid_x, p.grid_y, idx);
         let sample_z = p
             .samples
             .as_ref()
@@ -568,7 +556,6 @@ fn build_gantry(context: &Context, wpos: V3, z_top: f32) -> Gm<Mesh, ColorMateri
     let cross = Srgba::new(0x00, 0xff, 0xff, 0xff);
 
     let mut lb = LineBuilder::new();
-    // Spindle column from top down to tool tip
     lb.add(
         V3 {
             x: wpos.x,
@@ -627,7 +614,6 @@ fn build_gantry(context: &Context, wpos: V3, z_top: f32) -> Gm<Mesh, ColorMateri
         GRID_W,
     );
 
-    // Drop line to Z=0
     if wpos.z.abs() > 0.5 {
         lb.add(
             wpos,
@@ -640,7 +626,6 @@ fn build_gantry(context: &Context, wpos: V3, z_top: f32) -> Gm<Mesh, ColorMateri
             GRID_W,
         );
     }
-    // Crosshair at tool tip
     let cd = 4.0f32;
     lb.add(
         V3 {
@@ -670,7 +655,6 @@ fn build_gantry(context: &Context, wpos: V3, z_top: f32) -> Gm<Mesh, ColorMateri
         cross,
         LINE_W,
     );
-    // Shadow on Z=0
     let shadow = Srgba::new(0x00, 0xff, 0xff, 0x33);
     let sd = 3.0f32;
     lb.add(

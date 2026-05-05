@@ -11,6 +11,23 @@ pub struct HeightMap {
     pub z: Vec<f32>,
 }
 
+pub fn grid_point(
+    bbox_min: (f32, f32),
+    bbox_max: (f32, f32),
+    grid_x: u32,
+    grid_y: u32,
+    idx: usize,
+) -> (f32, f32) {
+    let i = (idx % grid_x as usize) as u32;
+    let j = (idx / grid_x as usize) as u32;
+    let fx = i as f32 / (grid_x - 1).max(1) as f32;
+    let fy = j as f32 / (grid_y - 1).max(1) as f32;
+    (
+        bbox_min.0 + fx * (bbox_max.0 - bbox_min.0),
+        bbox_min.1 + fy * (bbox_max.1 - bbox_min.1),
+    )
+}
+
 impl HeightMap {
     pub fn new(
         bbox_min: (f32, f32),
