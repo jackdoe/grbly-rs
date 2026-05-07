@@ -78,6 +78,14 @@ use crate::grbl::heightmap::HeightMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Debug)]
+pub struct TransformCache {
+    pub lines: Arc<Vec<String>>,
+    pub heightmap: Option<Arc<HeightMap>>,
+    pub transformed: Vec<String>,
+    pub src: Vec<usize>,
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct JobState {
     pub lines: Arc<Vec<String>>,
@@ -91,9 +99,12 @@ pub struct JobState {
     pub violated_lines: Arc<Vec<bool>>,
     pub seg_pass_counts: Arc<Vec<u16>>,
     pub line_pass_counts: Arc<Vec<u16>>,
+    pub line_has_z: Arc<Vec<bool>>,
+    pub line_has_rapid: Arc<Vec<bool>>,
     pub pass_tolerance_mm: f32,
     pub version: usize,
     pub heightmap: Option<Arc<HeightMap>>,
+    pub transform_cache: Option<Arc<TransformCache>>,
 }
 
 pub const DEFAULT_PASS_TOLERANCE_MM: f32 = 0.05;

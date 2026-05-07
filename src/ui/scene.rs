@@ -26,6 +26,7 @@ pub struct Scene {
     trail_points: Vec<V3>,
     trail_dirty: bool,
     last_pos: V3,
+    last_z_clearance: f32,
     last_version: usize,
     last_connected: bool,
     last_wco: V3,
@@ -80,6 +81,7 @@ impl Scene {
             trail_points: Vec::new(),
             trail_dirty: false,
             last_pos: V3::default(),
+            last_z_clearance: 0.0,
             last_version: 0,
             last_connected: false,
             last_wco: V3::default(),
@@ -100,7 +102,8 @@ impl Scene {
         } = args;
 
         let wpos = tool_pos;
-        if wpos != self.last_pos {
+        let wpos_changed = wpos != self.last_pos;
+        if wpos_changed {
             self.trail_points.push(wpos);
             if self.trail_points.len() > 5000 {
                 let drain = self.trail_points.len() - 5000;
@@ -112,7 +115,11 @@ impl Scene {
 
         let wco = mstate.wco;
         let z_clearance = if wco.z.abs() > 0.01 { -wco.z } else { 30.0 };
-        self.gantry = Some(build_gantry(context, wpos, z_clearance));
+        let z_clearance_changed = (z_clearance - self.last_z_clearance).abs() > f32::EPSILON;
+        if self.gantry.is_none() || wpos_changed || z_clearance_changed {
+            self.gantry = Some(build_gantry(context, wpos, z_clearance));
+            self.last_z_clearance = z_clearance;
+        }
 
         if self.trail_dirty && self.trail_points.len() >= 2 {
             self.trail = Some(build_trail(context, &self.trail_points));

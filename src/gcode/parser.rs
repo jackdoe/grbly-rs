@@ -51,20 +51,21 @@ pub fn parse_with_bounds(lines: &[String]) -> (Vec<Segment>, Vec3, Vec3) {
 
     let mut segs = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        for s in p.parse_line(line, i) {
+        let before = segs.len();
+        p.parse_line(line, i, &mut segs);
+        for s in &segs[before..] {
             update_bounds(s.start, &mut bmin, &mut bmax);
             update_bounds(s.end, &mut bmin, &mut bmax);
-            segs.push(s);
         }
     }
     (segs, bmin, bmax)
 }
 
 impl Parser {
-    fn parse_line(&mut self, raw: &str, line_num: usize) -> Vec<Segment> {
+    fn parse_line(&mut self, raw: &str, line_num: usize, out: &mut Vec<Segment>) {
         let words = parse_words(raw);
         if words.is_empty() {
-            return Vec::new();
+            return;
         }
 
         let mut has_motion = false;
@@ -144,7 +145,7 @@ impl Parser {
         }
 
         if !has_motion {
-            return Vec::new();
+            return;
         }
 
         let mut target = self.pos;
@@ -173,14 +174,13 @@ impl Parser {
 
         match self.motion {
             0 | 1 => {
-                let seg = Segment {
+                out.push(Segment {
                     start: self.pos,
                     end: target,
                     rapid: self.motion == 0,
                     line: line_num,
-                };
+                });
                 self.pos = target;
-                vec![seg]
             }
             2 | 3 => {
                 let mut center = self.pos;
@@ -196,11 +196,10 @@ impl Parser {
                         center.y += (jj * unit) as f32;
                     }
                 }
-                let segs = tessellate_arc(self.pos, target, center, clockwise, line_num);
+                tessellate_arc(self.pos, target, center, clockwise, line_num, out);
                 self.pos = target;
-                segs
             }
-            _ => Vec::new(),
+            _ => {}
         }
     }
 }
@@ -275,12 +274,12 @@ fn tessellate_arc(
     center: Vec3,
     clockwise: bool,
     line: usize,
-) -> Vec<Segment> {
+    out: &mut Vec<Segment>,
+) {
     let pts = tessellate_arc_points(start, end, center, clockwise);
-    let mut segs = Vec::with_capacity(pts.len());
     let mut prev = start;
     for pt in pts {
-        segs.push(Segment {
+        out.push(Segment {
             start: prev,
             end: pt,
             rapid: false,
@@ -288,7 +287,6 @@ fn tessellate_arc(
         });
         prev = pt;
     }
-    segs
 }
 
 fn arc_sweep(start: Vec3, end: Vec3, center: Vec3, clockwise: bool) -> f64 {

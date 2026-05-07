@@ -507,6 +507,7 @@ fn map_section(
         if ui.add(clear).clicked() {
             let mut j = job_lock.write();
             j.heightmap = None;
+            j.transform_cache = None;
             j.version = j.version.wrapping_add(1);
             heightmap::clear_cached();
             state.phase = ProbePhase::Idle;
@@ -715,6 +716,7 @@ fn poll_completion(state: &mut ProbeState, job_lock: &Arc<RwLock<JobState>>) {
                 let _ = heightmap::save_cached(&arc);
                 let mut j = job_lock.write();
                 j.heightmap = Some(arc);
+                j.transform_cache = None;
                 j.version = j.version.wrapping_add(1);
             }
         }

@@ -37,6 +37,15 @@ fn load_file(path: &Path, job_lock: &RwLock<JobState>) -> Result<LoadReport, Str
     let lines: Vec<String> = content.lines().map(String::from).collect();
     let (segs, bmin, bmax) = gcode::parser::parse_with_bounds(&lines);
     let total_dist: f32 = segs.iter().map(|s| s.start.dist(s.end)).sum();
+
+    let mut line_has_rapid = vec![false; lines.len()];
+    for seg in &segs {
+        if seg.rapid && seg.line < line_has_rapid.len() {
+            line_has_rapid[seg.line] = true;
+        }
+    }
+    let line_has_z: Vec<bool> = lines.iter().map(|l| has_word(l, b'Z')).collect();
+
     let report = LoadReport {
         line_count: lines.len(),
         segment_count: segs.len(),
@@ -47,12 +56,15 @@ fn load_file(path: &Path, job_lock: &RwLock<JobState>) -> Result<LoadReport, Str
     j.violated_lines = Arc::new(vec![false; lines.len()]);
     j.seg_pass_counts = Arc::new(vec![1; segs.len()]);
     j.line_pass_counts = Arc::new(vec![1; lines.len()]);
+    j.line_has_z = Arc::new(line_has_z);
+    j.line_has_rapid = Arc::new(line_has_rapid);
     j.pass_tolerance_mm = 0.0;
     j.lines = Arc::new(lines);
     j.segments = Arc::new(segs);
     j.bounds_min = bmin;
     j.bounds_max = bmax;
     j.total_dist = total_dist;
+    j.transform_cache = None;
     j.version = j.version.wrapping_add(1);
     j.status = JobStatus::Idle;
     j.current_line = 0;
@@ -750,7 +762,7 @@ fn draw_gcode_lines(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobStat
     let visible: Vec<usize> = match state.filter {
         EditorFilter::All => Vec::new(),
         EditorFilter::Z => (0..jstate.lines.len())
-            .filter(|&i| has_word(&jstate.lines[i], b'Z'))
+            .filter(|&i| jstate.line_has_z.get(i).copied().unwrap_or(false))
             .collect(),
         EditorFilter::Limits => (0..jstate.lines.len())
             .filter(|&i| jstate.violated_lines.get(i).copied().unwrap_or(false))
@@ -759,7 +771,7 @@ fn draw_gcode_lines(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobStat
             .filter(|&i| jstate.line_pass_counts.get(i).copied().unwrap_or(1) > 1)
             .collect(),
         EditorFilter::Rapids => (0..jstate.lines.len())
-            .filter(|&i| line_has_rapid(jstate, i))
+            .filter(|&i| jstate.line_has_rapid.get(i).copied().unwrap_or(false))
             .collect(),
     };
 
@@ -831,10 +843,10 @@ fn draw_line_row(
                 .size(12.0)
                 .color(LINE_NUM),
         );
-        if has_word(&jstate.lines[i], b'Z') {
+        if jstate.line_has_z.get(i).copied().unwrap_or(false) {
             ui.label(egui::RichText::new("Z").size(12.0).color(CYAN));
         }
-        if line_has_rapid(jstate, i) {
+        if jstate.line_has_rapid.get(i).copied().unwrap_or(false) {
             ui.label(egui::RichText::new("R").size(12.0).color(AMBER));
         }
         let pass_count = jstate.line_pass_counts.get(i).copied().unwrap_or(1);
@@ -880,10 +892,6 @@ fn can_live_step(mstate: &MachineState, jstate: &JobState, has_lines: bool) -> b
         && mstate.connected
         && mstate.status == Status::Idle
         && !matches!(jstate.status, JobStatus::Running | JobStatus::Paused)
-}
-
-fn line_has_rapid(jstate: &JobState, line: usize) -> bool {
-    jstate.segments.iter().any(|s| s.line == line && s.rapid)
 }
 
 fn heat_badge_color(pass_count: u16) -> egui::Color32 {

@@ -58,8 +58,6 @@ pub fn draw(
     log: &Arc<Mutex<LogBuffer>>,
     state: &mut ConsoleState,
 ) {
-    let log_lines: Vec<String> = log.lock().lines().to_vec();
-
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("CONSOLE")
@@ -89,6 +87,8 @@ pub fn draw(
                 .auto_shrink([false; 2])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
+                    let guard = log.lock();
+                    let log_lines = guard.lines();
                     if log_lines.is_empty() {
                         ui.label(
                             egui::RichText::new("--- NO LOG ---")
@@ -96,7 +96,7 @@ pub fn draw(
                                 .color(egui::Color32::from_rgb(0x33, 0x2a, 0x11)),
                         );
                     }
-                    for line in &log_lines {
+                    for line in log_lines {
                         ui.label(egui::RichText::new(line).size(12.0).color(line_color(line)));
                     }
                 });

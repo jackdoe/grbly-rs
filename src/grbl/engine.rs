@@ -11,6 +11,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::gcode::transform::transform_for_stream;
 use crate::gcode::words::strip_comments;
+use crate::grbl::heightmap::HeightMap;
 
 use super::parser::{parse_response, Response, ResponseType};
 use super::serial::Serial;
@@ -195,7 +196,7 @@ impl SendPipe {
         }
         let to_send = {
             let mut q = self.queue.lock();
-            q.enqueue(line);
+            q.enqueue(line.into_owned());
             q.flush()
         };
         self.write_to_serial(&to_send);
@@ -246,7 +247,7 @@ impl SendPipe {
                 if !q.has_space_for(line.len()) {
                     continue;
                 }
-                q.enqueue(line);
+                q.enqueue(line.into_owned());
                 q.flush()
             };
             self.write_to_serial(&to_send);
@@ -497,15 +498,10 @@ impl Engine {
         if self.job.read().status == JobStatus::Running {
             return;
         }
-        let (transformed, src, lines_len, violated_lines) = {
+        let cache = self.ensure_transformed();
+        let (lines_len, violated_lines) = {
             let j = self.job.read();
-            let lines = j.lines.clone();
-            let hmap = j.heightmap.clone();
-            let lines_len = j.lines.len();
-            let violated_lines = j.violated_lines.clone();
-            drop(j);
-            let (t, s) = transform_for_stream(&lines, hmap.as_deref());
-            (t, s, lines_len, violated_lines)
+            (j.lines.len(), j.violated_lines.clone())
         };
 
         loop {
@@ -523,11 +519,11 @@ impl Engine {
             j.current_line += 1;
             drop(j);
 
-            let start_idx = src.partition_point(|&s| s < source);
-            let end_idx = src.partition_point(|&s| s <= source);
+            let start_idx = cache.src.partition_point(|&s| s < source);
+            let end_idx = cache.src.partition_point(|&s| s <= source);
             let mut sent_any = false;
-            for line in &transformed[start_idx..end_idx] {
-                let stripped = strip_comments(line).trim().to_string();
+            for line in &cache.transformed[start_idx..end_idx] {
+                let stripped = strip_comments(line);
                 if !stripped.is_empty() {
                     self.pipe.send(&stripped);
                     sent_any = true;
@@ -607,14 +603,10 @@ impl Engine {
     }
 
     fn stream_job(&self) {
-        let (lines, violated_lines, transformed, src) = {
+        let cache = self.ensure_transformed();
+        let (lines, violated_lines) = {
             let j = self.job.read();
-            let lines = j.lines.clone();
-            let violated_lines = j.violated_lines.clone();
-            let hmap = j.heightmap.clone();
-            drop(j);
-            let (t, s) = transform_for_stream(&lines, hmap.as_deref());
-            (lines, violated_lines, t, s)
+            (j.lines.clone(), j.violated_lines.clone())
         };
 
         let should_stop = || {
@@ -625,7 +617,7 @@ impl Engine {
         };
         let is_paused = || self.job.read().status == JobStatus::Paused;
 
-        for (i, line) in transformed.iter().enumerate() {
+        for (i, line) in cache.transformed.iter().enumerate() {
             if should_stop() {
                 return;
             }
@@ -635,7 +627,7 @@ impl Engine {
                     return;
                 }
             }
-            let source_line = src[i];
+            let source_line = cache.src[i];
             if source_line < violated_lines.len() && violated_lines[source_line] {
                 self.pipe.log(format!(
                     "SOFT LIMIT at line {}: {}",
@@ -645,12 +637,7 @@ impl Engine {
                 self.job.write().status = JobStatus::Idle;
                 return;
             }
-            let stripped = strip_comments(line).trim().to_string();
-            if stripped.is_empty() {
-                self.job.write().current_line = source_line + 1;
-                continue;
-            }
-            if !self.pipe.send_job_line(&stripped, &should_stop, &is_paused) {
+            if !self.pipe.send_job_line(line, &should_stop, &is_paused) {
                 return;
             }
             self.job.write().current_line = source_line + 1;
@@ -658,6 +645,43 @@ impl Engine {
         if self.pipe.wait_job_idle(&should_stop, &is_paused) && !should_stop() {
             self.job.write().status = JobStatus::Complete;
         }
+    }
+
+    fn ensure_transformed(&self) -> Arc<TransformCache> {
+        {
+            let j = self.job.read();
+            if let Some(c) = &j.transform_cache {
+                if Arc::ptr_eq(&c.lines, &j.lines) && hmap_ptr_eq(&c.heightmap, &j.heightmap) {
+                    return c.clone();
+                }
+            }
+        }
+        let (lines_arc, hmap) = {
+            let j = self.job.read();
+            (j.lines.clone(), j.heightmap.clone())
+        };
+        let (transformed, src) = transform_for_stream(&lines_arc[..], hmap.as_deref());
+        let cache = Arc::new(TransformCache {
+            lines: lines_arc.clone(),
+            heightmap: hmap.clone(),
+            transformed,
+            src,
+        });
+        {
+            let mut j = self.job.write();
+            if Arc::ptr_eq(&j.lines, &lines_arc) && hmap_ptr_eq(&j.heightmap, &hmap) {
+                j.transform_cache = Some(cache.clone());
+            }
+        }
+        cache
+    }
+}
+
+fn hmap_ptr_eq(a: &Option<Arc<HeightMap>>, b: &Option<Arc<HeightMap>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+        _ => false,
     }
 }
 

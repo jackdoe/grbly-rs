@@ -1,11 +1,16 @@
+use std::borrow::Cow;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Word {
     pub letter: u8,
     pub value: f64,
 }
 
-pub fn strip_comments(line: &str) -> String {
-    let mut out = String::new();
+pub fn strip_comments(line: &str) -> Cow<'_, str> {
+    if !line.contains('(') && !line.contains(';') {
+        return Cow::Borrowed(line.trim());
+    }
+    let mut out = String::with_capacity(line.len());
     let mut depth = 0i32;
 
     for c in line.chars() {
@@ -18,7 +23,7 @@ pub fn strip_comments(line: &str) -> String {
         }
     }
 
-    out.trim().to_string()
+    Cow::Owned(out.trim().to_string())
 }
 
 pub fn parse_words(line: &str) -> Vec<Word> {
