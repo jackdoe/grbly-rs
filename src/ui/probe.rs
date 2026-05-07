@@ -222,16 +222,29 @@ fn single_probe(
                 .size(11.0)
                 .color(WHITE),
         );
-        let set_btn =
-            egui::Button::new(egui::RichText::new("SET Z0 HERE").size(12.0).color(GREEN))
-                .fill(egui::Color32::from_rgb(0x00, 0x33, 0x11))
-                .min_size(egui::vec2(ui.available_width(), 24.0));
-        if ui.add_enabled(can_probe, set_btn).clicked() {
-            engine.send(&format!("G10 L20 P1 Z{:.4}", mstate.wpos.z - z));
-            let mut sh = state.shared.lock();
-            sh.single_z = None;
-            sh.single_msg = format!("Z0 set at probed surface (was Z={:.3})", z);
-        }
+        ui.columns(2, |cols| {
+            let z_btn =
+                egui::Button::new(egui::RichText::new("SET Z0 HERE").size(12.0).color(GREEN))
+                    .fill(egui::Color32::from_rgb(0x00, 0x33, 0x11))
+                    .min_size(egui::vec2(0.0, 24.0));
+            if cols[0].add_enabled(can_probe, z_btn).clicked() {
+                engine.send(&format!("G10 L20 P1 Z{:.4}", mstate.wpos.z - z));
+                let mut sh = state.shared.lock();
+                sh.single_z = None;
+                sh.single_msg = format!("Z0 set at probed surface (was Z={:.3})", z);
+            }
+            let xyz_btn = egui::Button::new(
+                egui::RichText::new("SET XYZ0 HERE").size(12.0).color(GREEN),
+            )
+            .fill(egui::Color32::from_rgb(0x00, 0x33, 0x11))
+            .min_size(egui::vec2(0.0, 24.0));
+            if cols[1].add_enabled(can_probe, xyz_btn).clicked() {
+                engine.send(&format!("G10 L20 P1 X0 Y0 Z{:.4}", mstate.wpos.z - z));
+                let mut sh = state.shared.lock();
+                sh.single_z = None;
+                sh.single_msg = format!("XYZ0 set: XY here, Z at probed surface (was {:.3})", z);
+            }
+        });
     }
     if !last_msg.is_empty() {
         let color = if last_z.is_some() { GREEN } else { AMBER };
@@ -260,7 +273,7 @@ fn spawn_single_probe(engine: Arc<Engine>, state: &mut ProbeState, zero_after: b
                     let current_z = engine.state.read().wpos.z;
                     engine.send(&format!("G10 L20 P1 Z{:.4}", current_z - z));
                     let mut sh = shared.lock();
-                    sh.single_z = Some(z);
+                    sh.single_z = None;
                     sh.single_msg = format!("zeroed Z at probed surface (was {:.3})", z);
                     sh.finished = true;
                 } else {

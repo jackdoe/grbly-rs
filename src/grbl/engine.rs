@@ -586,8 +586,8 @@ impl Engine {
         *self.pipe.probe_result_tx.lock() = Some(tx);
 
         if let Some((x, y)) = rapid_xy {
-            self.pipe
-                .send(&format!("G90 G21 G0 X{:.3} Y{:.3} Z{:.3}", x, y, rapid_z));
+            self.pipe.send(&format!("G90 G21 G0 Z{:.3}", rapid_z));
+            self.pipe.send(&format!("G90 G21 G0 X{:.3} Y{:.3}", x, y));
         }
         self.pipe
             .send(&format!("G38.3 Z{:.4} F{:.1}", target_z, feed));
