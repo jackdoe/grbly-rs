@@ -8,7 +8,7 @@ use three_d::egui;
 
 use crate::grbl::engine::{Engine, SleepInhibitor};
 use crate::grbl::heightmap::{self, grid_point, HeightMap};
-use crate::grbl::state::{JobState, JobStatus, MachineState, Status};
+use crate::grbl::state::{compute_line_map_modified, JobState, JobStatus, MachineState, Status};
 
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
 const DIM: egui::Color32 = egui::Color32::from_rgb(0x88, 0x77, 0x44);
@@ -105,7 +105,7 @@ pub fn draw(
     job_lock: &Arc<RwLock<JobState>>,
     state: &mut ProbeState,
 ) {
-    poll_completion(state, job_lock);
+    poll_completion(engine, state, job_lock);
 
     pin_indicator(ui, mstate);
 
@@ -122,7 +122,7 @@ pub fn draw(
     grid_section(ui, engine, mstate, jstate, state);
 
     ui.separator();
-    map_section(ui, jstate, job_lock, state);
+    map_section(ui, engine, jstate, job_lock, state);
 }
 
 fn section(ui: &mut egui::Ui, label: &str) {
@@ -486,6 +486,7 @@ fn manual_controls(
 
 fn map_section(
     ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
     jstate: &JobState,
     job_lock: &Arc<RwLock<JobState>>,
     state: &mut ProbeState,
@@ -506,11 +507,15 @@ fn map_section(
             .min_size(egui::vec2(ui.available_width(), 22.0));
         if ui.add(clear).clicked() {
             let mut j = job_lock.write();
+            let line_count = j.lines.len();
             j.heightmap = None;
+            j.line_map_modified = Arc::new(vec![false; line_count]);
             j.transform_cache = None;
             j.version = j.version.wrapping_add(1);
+            drop(j);
             heightmap::clear_cached();
             state.phase = ProbePhase::Idle;
+            engine.log("heightmap cleared".into());
         }
     } else {
         ui.label(egui::RichText::new("no map").size(11.0).color(DIM));
@@ -696,7 +701,11 @@ fn abort_manual(state: &mut ProbeState, engine: &Arc<Engine>) {
     state.shared.lock().finished = true;
 }
 
-fn poll_completion(state: &mut ProbeState, job_lock: &Arc<RwLock<JobState>>) {
+fn poll_completion(
+    engine: &Arc<Engine>,
+    state: &mut ProbeState,
+    job_lock: &Arc<RwLock<JobState>>,
+) {
     let finished = state.shared.lock().finished;
     if !finished {
         return;
@@ -705,19 +714,33 @@ fn poll_completion(state: &mut ProbeState, job_lock: &Arc<RwLock<JobState>>) {
     if state.phase == ProbePhase::Grid {
         let samples = state.shared.lock().samples.clone();
         if let Some(z) = fill_skipped(&samples, &state.skipped) {
-            if let Ok(map) = HeightMap::new(
+            match HeightMap::new(
                 state.bbox_min,
                 state.bbox_max,
                 state.grid_x,
                 state.grid_y,
                 z,
             ) {
-                let arc = Arc::new(map);
-                let _ = heightmap::save_cached(&arc);
-                let mut j = job_lock.write();
-                j.heightmap = Some(arc);
-                j.transform_cache = None;
-                j.version = j.version.wrapping_add(1);
+                Ok(map) => {
+                    let arc = Arc::new(map);
+                    match heightmap::save_cached(&arc) {
+                        Ok(()) => engine.log(format!(
+                            "heightmap saved ({}x{})",
+                            arc.grid_x, arc.grid_y
+                        )),
+                        Err(e) => engine.log(format!(
+                            "!! heightmap save failed (kept in memory): {e}"
+                        )),
+                    }
+                    let mut j = job_lock.write();
+                    let line_map_modified =
+                        compute_line_map_modified(&j.segments, j.lines.len(), Some(&arc));
+                    j.line_map_modified = Arc::new(line_map_modified);
+                    j.heightmap = Some(arc);
+                    j.transform_cache = None;
+                    j.version = j.version.wrapping_add(1);
+                }
+                Err(e) => engine.log(format!("!! heightmap build failed: {e}")),
             }
         }
     }

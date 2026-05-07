@@ -375,6 +375,10 @@ impl Engine {
         *self.pipe.on_log.lock() = Some(Arc::new(f));
     }
 
+    pub fn log(&self, msg: String) {
+        self.pipe.log(msg);
+    }
+
     pub fn connect(&self, port: &str, baud: u32) -> std::io::Result<()> {
         if let Some(stop) = self.stop_flag.lock().take() {
             stop.store(true, Ordering::Relaxed);

@@ -95,7 +95,7 @@ pub fn draw(
                 ui.set_min_width(ui.available_width());
                 connection_section(ui, engine, mstate, ui_state);
                 ui.separator();
-                machine_readout(ui, engine, mstate);
+                machine_readout(ui, engine, mstate, jstate);
                 draw_notice(ui, ui_state);
                 ui.separator();
                 tab_bar(ui, ui_state);
@@ -184,7 +184,12 @@ fn connection_section(
     });
 }
 
-fn machine_readout(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState) {
+fn machine_readout(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    mstate: &MachineState,
+    jstate: &JobState,
+) {
     let (color, text) = status_display(mstate.status);
     ui.horizontal(|ui| {
         ui.label(
@@ -219,6 +224,22 @@ fn machine_readout(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineStat
             .size(11.0)
             .color(DIM),
         );
+    }
+    match &jstate.heightmap {
+        Some(map) => {
+            let (lo, hi) = map.z_min_max();
+            ui.label(
+                egui::RichText::new(format!(
+                    "MAP {}x{}  Δ {:.3}..{:.3} mm",
+                    map.grid_x, map.grid_y, lo, hi
+                ))
+                .size(11.0)
+                .color(GREEN),
+            );
+        }
+        None => {
+            ui.label(egui::RichText::new("MAP off").size(11.0).color(DIM));
+        }
     }
     if !mstate.last_error.is_empty() {
         banner(ui, &mstate.last_error, RED);

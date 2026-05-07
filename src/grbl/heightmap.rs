@@ -166,18 +166,35 @@ pub fn cache_path() -> Option<PathBuf> {
 pub fn save_cached(map: &HeightMap) -> Result<(), String> {
     let path = cache_path().ok_or_else(|| "no HOME".to_string())?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let mut f = fs::File::create(&path).map_err(|e| e.to_string())?;
-    f.write_all(map.serialize().as_bytes())
-        .map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("txt.tmp");
+    {
+        let mut f = fs::File::create(&tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        f.write_all(map.serialize().as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        f.sync_all()
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+    }
+    fs::rename(&tmp, &path)
+        .map_err(|e| format!("rename {}->{}: {e}", tmp.display(), path.display()))?;
     Ok(())
 }
 
-pub fn load_cached() -> Option<HeightMap> {
-    let path = cache_path()?;
-    let text = fs::read_to_string(&path).ok()?;
-    HeightMap::parse(&text).ok()
+pub fn load_cached() -> Result<Option<HeightMap>, String> {
+    let path = match cache_path() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    HeightMap::parse(&text)
+        .map(Some)
+        .map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 pub fn clear_cached() {

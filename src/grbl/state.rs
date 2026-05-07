@@ -101,10 +101,35 @@ pub struct JobState {
     pub line_pass_counts: Arc<Vec<u16>>,
     pub line_has_z: Arc<Vec<bool>>,
     pub line_has_rapid: Arc<Vec<bool>>,
+    pub line_map_modified: Arc<Vec<bool>>,
     pub pass_tolerance_mm: f32,
     pub version: usize,
     pub heightmap: Option<Arc<HeightMap>>,
     pub transform_cache: Option<Arc<TransformCache>>,
+}
+
+const MAP_DZ_EPSILON: f32 = 5e-5;
+
+pub fn compute_line_map_modified(
+    segments: &[Segment],
+    line_count: usize,
+    heightmap: Option<&HeightMap>,
+) -> Vec<bool> {
+    let mut out = vec![false; line_count];
+    let Some(map) = heightmap else {
+        return out;
+    };
+    for seg in segments {
+        if seg.line >= out.len() || out[seg.line] {
+            continue;
+        }
+        if map.dz(seg.start.x, seg.start.y).abs() > MAP_DZ_EPSILON
+            || map.dz(seg.end.x, seg.end.y).abs() > MAP_DZ_EPSILON
+        {
+            out[seg.line] = true;
+        }
+    }
+    out
 }
 
 pub const DEFAULT_PASS_TOLERANCE_MM: f32 = 0.05;

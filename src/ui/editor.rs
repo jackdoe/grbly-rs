@@ -52,12 +52,14 @@ fn load_file(path: &Path, job_lock: &RwLock<JobState>) -> Result<LoadReport, Str
     };
 
     let mut j = job_lock.write();
+    let line_map_modified = compute_line_map_modified(&segs, lines.len(), j.heightmap.as_deref());
     j.seg_violations = Arc::new(vec![false; segs.len()]);
     j.violated_lines = Arc::new(vec![false; lines.len()]);
     j.seg_pass_counts = Arc::new(vec![1; segs.len()]);
     j.line_pass_counts = Arc::new(vec![1; lines.len()]);
     j.line_has_z = Arc::new(line_has_z);
     j.line_has_rapid = Arc::new(line_has_rapid);
+    j.line_map_modified = Arc::new(line_map_modified);
     j.pass_tolerance_mm = 0.0;
     j.lines = Arc::new(lines);
     j.segments = Arc::new(segs);
@@ -88,6 +90,7 @@ pub enum EditorFilter {
     Limits,
     Heat,
     Rapids,
+    Map,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -626,6 +629,7 @@ fn draw_navigation(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobState
             ("LIMIT", EditorFilter::Limits),
             ("HEAT", EditorFilter::Heat),
             ("RAPID", EditorFilter::Rapids),
+            ("MAP", EditorFilter::Map),
         ] {
             if ui
                 .selectable_label(
@@ -773,6 +777,9 @@ fn draw_gcode_lines(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobStat
         EditorFilter::Rapids => (0..jstate.lines.len())
             .filter(|&i| jstate.line_has_rapid.get(i).copied().unwrap_or(false))
             .collect(),
+        EditorFilter::Map => (0..jstate.lines.len())
+            .filter(|&i| jstate.line_map_modified.get(i).copied().unwrap_or(false))
+            .collect(),
     };
 
     let header = match state.filter {
@@ -781,6 +788,7 @@ fn draw_gcode_lines(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobStat
         EditorFilter::Limits => format!("{} limit lines  [{}]", visible.len(), active_line),
         EditorFilter::Heat => format!("{} repeated lines  [{}]", visible.len(), active_line),
         EditorFilter::Rapids => format!("{} rapid lines  [{}]", visible.len(), active_line),
+        EditorFilter::Map => format!("{} map-modified lines  [{}]", visible.len(), active_line),
     };
     ui.label(egui::RichText::new(header).size(11.0).color(DIM));
 
@@ -848,6 +856,9 @@ fn draw_line_row(
         }
         if jstate.line_has_rapid.get(i).copied().unwrap_or(false) {
             ui.label(egui::RichText::new("R").size(12.0).color(AMBER));
+        }
+        if jstate.line_map_modified.get(i).copied().unwrap_or(false) {
+            ui.label(egui::RichText::new("M").size(12.0).color(GREEN));
         }
         let pass_count = jstate.line_pass_counts.get(i).copied().unwrap_or(1);
         if state.show_heatmap && pass_count > 1 {

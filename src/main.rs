@@ -65,11 +65,6 @@ fn setup_theme(ctx: &egui::Context) {
 fn main() {
     let state = Arc::new(RwLock::new(MachineState::default()));
     let job = Arc::new(RwLock::new(JobState::default()));
-    if let Some(map) = heightmap::load_cached() {
-        let mut j = job.write();
-        j.heightmap = Some(Arc::new(map));
-        j.version = j.version.wrapping_add(1);
-    }
     let engine = Arc::new(Engine::new(state.clone(), job.clone()));
     let log = Arc::new(Mutex::new(LogBuffer::new()));
 
@@ -78,6 +73,27 @@ fn main() {
         engine.set_on_log(move |line| {
             log_clone.lock().add(line);
         });
+    }
+
+    match heightmap::load_cached() {
+        Ok(Some(map)) => {
+            let grid_x = map.grid_x;
+            let grid_y = map.grid_y;
+            let arc = Arc::new(map);
+            let mut j = job.write();
+            let line_map_modified =
+                compute_line_map_modified(&j.segments, j.lines.len(), Some(&arc));
+            j.line_map_modified = Arc::new(line_map_modified);
+            j.heightmap = Some(arc);
+            j.transform_cache = None;
+            j.version = j.version.wrapping_add(1);
+            drop(j);
+            engine.log(format!("heightmap loaded from cache ({grid_x}x{grid_y})"));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            engine.log(format!("!! heightmap cache load failed: {e}"));
+        }
     }
 
     let event_loop = EventLoop::new();
