@@ -34,6 +34,7 @@ pub struct ControlsState {
     pub port_list: Vec<String>,
     pub port_index: usize,
     pub jog_step: f32,
+    pub spindle_rpm: u32,
     travel: Vec3,
     last_max_travel: Vec3,
     tab: ControlsTab,
@@ -47,6 +48,7 @@ impl Default for ControlsState {
             port_list: Vec::new(),
             port_index: 0,
             jog_step: 1.0,
+            spindle_rpm: 10000,
             travel: Vec3::default(),
             last_max_travel: Vec3::default(),
             tab: ControlsTab::Run,
@@ -481,17 +483,30 @@ fn machine_actions(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineStat
             engine.send("$X");
         }
     });
-    if ui
-        .add_enabled(
-            can_idle,
-            egui::Button::new(egui::RichText::new("WORK HOME XYZ0").size(14.0))
-                .fill(BTN_BG)
-                .min_size(egui::vec2(ui.available_width(), 28.0)),
-        )
-        .clicked()
-    {
-        engine.send("G90 G21 G0 X0 Y0 Z0");
-    }
+    ui.columns(2, |cols| {
+        if cols[0]
+            .add_enabled(
+                can_idle,
+                egui::Button::new(egui::RichText::new("WORK HOME XY0").size(14.0))
+                    .fill(BTN_BG)
+                    .min_size(egui::vec2(cols[0].available_width(), 28.0)),
+            )
+            .clicked()
+        {
+            engine.send("G90 G21 G0 X0 Y0");
+        }
+        if cols[1]
+            .add_enabled(
+                can_idle,
+                egui::Button::new(egui::RichText::new("WORK HOME XYZ0").size(14.0))
+                    .fill(BTN_BG)
+                    .min_size(egui::vec2(cols[1].available_width(), 28.0)),
+            )
+            .clicked()
+        {
+            engine.send("G90 G21 G0 X0 Y0 Z0");
+        }
+    });
     ui.columns(3, |cols| {
         if cols[0].add_enabled(can_idle, wide_btn("ZERO XY")).clicked() {
             engine.send("G10 L20 P1 X0 Y0");
@@ -516,15 +531,36 @@ fn spindle_section(
 ) {
     section(ui, "Spindle");
     let enabled = mstate.connected && matches!(mstate.status, Status::Idle | Status::Run);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("RPM").size(12.0).color(DIM));
+        ui.add(
+            egui::DragValue::new(&mut state.spindle_rpm)
+                .range(0..=30000)
+                .speed(100.0),
+        );
+        if mstate.spindle > 0.0 {
+            ui.label(
+                egui::RichText::new(format!("live {:.0}", mstate.spindle))
+                    .size(11.0)
+                    .color(DIM),
+            );
+        }
+    });
     ui.columns(2, |cols| {
-        let on_btn = egui::Button::new(egui::RichText::new("SPINDLE ON").size(14.0).color(GREEN))
+        let on_label = if mstate.spindle > 0.0 {
+            "SET RPM"
+        } else {
+            "SPINDLE ON"
+        };
+        let on_btn = egui::Button::new(egui::RichText::new(on_label).size(14.0).color(GREEN))
             .fill(egui::Color32::from_rgb(0x11, 0x33, 0x11))
             .min_size(egui::vec2(0.0, 28.0));
-        if cols[0].add_enabled(enabled, on_btn).clicked()
-            && confirm(state, ConfirmAction::SpindleOn)
-        {
-            engine.send("M3 S1000");
-            state.notice.clear();
+        if cols[0].add_enabled(enabled, on_btn).clicked() {
+            let already_running = mstate.spindle > 0.0;
+            if already_running || confirm(state, ConfirmAction::SpindleOn) {
+                engine.send(&format!("M3 S{}", state.spindle_rpm));
+                state.notice.clear();
+            }
         }
         let off_btn = egui::Button::new(egui::RichText::new("SPINDLE OFF").size(14.0).color(RED))
             .fill(egui::Color32::from_rgb(0x33, 0x11, 0x11))
