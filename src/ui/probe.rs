@@ -196,21 +196,12 @@ fn single_probe(
     let can_probe =
         mstate.connected && matches!(mstate.status, Status::Idle | Status::Jog) && !busy;
 
-    ui.columns(2, |cols| {
-        let probe_btn = egui::Button::new(egui::RichText::new("PROBE HERE").size(12.0).color(CYAN))
-            .fill(egui::Color32::from_rgb(0x00, 0x22, 0x33))
-            .min_size(egui::vec2(0.0, 26.0));
-        if cols[0].add_enabled(can_probe, probe_btn).clicked() {
-            spawn_single_probe(engine.clone(), state, false);
-        }
-        let zero_btn =
-            egui::Button::new(egui::RichText::new("PROBE → ZERO Z").size(12.0).color(GREEN))
-                .fill(egui::Color32::from_rgb(0x00, 0x33, 0x11))
-                .min_size(egui::vec2(0.0, 26.0));
-        if cols[1].add_enabled(can_probe, zero_btn).clicked() {
-            spawn_single_probe(engine.clone(), state, true);
-        }
-    });
+    let probe_btn = egui::Button::new(egui::RichText::new("PROBE HERE").size(12.0).color(CYAN))
+        .fill(egui::Color32::from_rgb(0x00, 0x22, 0x33))
+        .min_size(egui::vec2(ui.available_width(), 26.0));
+    if ui.add_enabled(can_probe, probe_btn).clicked() {
+        spawn_single_probe(engine.clone(), state);
+    }
 
     let (last_z, last_msg) = {
         let sh = state.shared.lock();
@@ -252,7 +243,7 @@ fn single_probe(
     }
 }
 
-fn spawn_single_probe(engine: Arc<Engine>, state: &mut ProbeState, zero_after: bool) {
+fn spawn_single_probe(engine: Arc<Engine>, state: &mut ProbeState) {
     state.phase = ProbePhase::Single;
     {
         let mut sh = state.shared.lock();
@@ -268,19 +259,9 @@ fn spawn_single_probe(engine: Arc<Engine>, state: &mut ProbeState, zero_after: b
         let mut sh = shared.lock();
         match result {
             Ok(z) => {
-                if zero_after {
-                    drop(sh);
-                    let current_z = engine.state.read().wpos.z;
-                    engine.send(&format!("G10 L20 P1 Z{:.4}", current_z - z));
-                    let mut sh = shared.lock();
-                    sh.single_z = None;
-                    sh.single_msg = format!("zeroed Z at probed surface (was {:.3})", z);
-                    sh.finished = true;
-                } else {
-                    sh.single_z = Some(z);
-                    sh.single_msg = format!("probed Z = {:.3} mm", z);
-                    sh.finished = true;
-                }
+                sh.single_z = Some(z);
+                sh.single_msg = format!("probed Z = {:.3} mm", z);
+                sh.finished = true;
             }
             Err(e) => {
                 sh.single_z = None;
