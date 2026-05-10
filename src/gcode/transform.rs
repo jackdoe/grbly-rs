@@ -1,7 +1,7 @@
 use crate::gcode::parser::{arc_center_from_radius, tessellate_arc_points};
 use crate::gcode::words::{parse_words, strip_comments, Word};
 use crate::grbl::heightmap::HeightMap;
-use crate::grbl::state::Vec3;
+use crate::grbl::state::{Orientation, Vec3};
 
 const CHUNK_MM: f32 = 1.0;
 
@@ -25,14 +25,66 @@ impl Default for ModalState {
     }
 }
 
+struct Emit<'a> {
+    hmap: Option<&'a HeightMap>,
+    orient: Orientation,
+    src: usize,
+    out_lines: &'a mut Vec<String>,
+    out_src: &'a mut Vec<usize>,
+}
+
+impl<'a> Emit<'a> {
+    fn pass_through(&mut self, line: String) {
+        self.out_lines.push(line);
+        self.out_src.push(self.src);
+    }
+
+    fn segment(&mut self, start: Vec3, end: Vec3, rapid: bool, feed: f32) {
+        let n = match self.hmap {
+            Some(_) => {
+                let dx = end.x - start.x;
+                let dy = end.y - start.y;
+                let xy_len = (dx * dx + dy * dy).sqrt();
+                if xy_len < 0.001 {
+                    1
+                } else {
+                    (xy_len / CHUNK_MM).ceil() as usize
+                }
+            }
+            None => 1,
+        };
+
+        for k in 1..=n {
+            let t = k as f32 / n as f32;
+            let sub = start.lerp(end, t);
+            let (rx, ry) = self.orient.apply_xy(sub.x, sub.y);
+            let dz = self.hmap.map(|m| m.dz(rx, ry)).unwrap_or(0.0);
+            let z_total = sub.z + dz;
+            let line = if rapid {
+                format!("G90 G21 G0 X{:.3} Y{:.3} Z{:.4}", rx, ry, z_total)
+            } else if feed > 0.0 {
+                format!(
+                    "G90 G21 G1 X{:.3} Y{:.3} Z{:.4} F{:.1}",
+                    rx, ry, z_total, feed
+                )
+            } else {
+                format!("G90 G21 G1 X{:.3} Y{:.3} Z{:.4}", rx, ry, z_total)
+            };
+            self.out_lines.push(line);
+            self.out_src.push(self.src);
+        }
+    }
+}
+
 pub fn transform_for_stream(
     lines: &[String],
     heightmap: Option<&HeightMap>,
+    orientation: Orientation,
 ) -> (Vec<String>, Vec<usize>) {
-    let Some(hmap) = heightmap else {
+    if heightmap.is_none() && orientation.is_identity() {
         let src: Vec<usize> = (0..lines.len()).collect();
         return (lines.to_vec(), src);
-    };
+    }
 
     let mut out_lines: Vec<String> = Vec::new();
     let mut out_src: Vec<usize> = Vec::new();
@@ -43,20 +95,20 @@ pub fn transform_for_stream(
         if stripped.is_empty() {
             continue;
         }
-        process_line(&stripped, i, &mut state, hmap, &mut out_lines, &mut out_src);
+        let mut emit = Emit {
+            hmap: heightmap,
+            orient: orientation,
+            src: i,
+            out_lines: &mut out_lines,
+            out_src: &mut out_src,
+        };
+        process_line(&stripped, &mut state, &mut emit);
     }
 
     (out_lines, out_src)
 }
 
-fn process_line(
-    line: &str,
-    src: usize,
-    state: &mut ModalState,
-    hmap: &HeightMap,
-    out_lines: &mut Vec<String>,
-    out_src: &mut Vec<usize>,
-) {
+fn process_line(line: &str, state: &mut ModalState, e: &mut Emit) {
     let words = parse_words(line);
 
     let mut has_motion_word = false;
@@ -74,7 +126,7 @@ fn process_line(
             b'G' => {
                 let n = w.value as i32;
                 match n {
-                    0 | 1 | 2 | 3 => {
+                    0..=3 => {
                         motion_override = Some(n);
                         has_motion_word = true;
                     }
@@ -127,8 +179,7 @@ fn process_line(
     }
 
     if !has_motion_word {
-        out_lines.push(line.to_string());
-        out_src.push(src);
+        e.pass_through(line.to_string());
         return;
     }
 
@@ -157,8 +208,7 @@ fn process_line(
     }
 
     if !other_words.is_empty() {
-        out_lines.push(other_words.join(" "));
-        out_src.push(src);
+        e.pass_through(other_words.join(" "));
     }
 
     let rapid = state.motion == 0;
@@ -166,7 +216,7 @@ fn process_line(
     let clockwise = state.motion == 2;
 
     if !arc {
-        emit_subdiv(state.pos, target, rapid, state.feed, hmap, src, out_lines, out_src);
+        e.segment(state.pos, target, rapid, state.feed);
     } else {
         let mut center = state.pos;
         if got_r {
@@ -183,51 +233,12 @@ fn process_line(
         let pts = tessellate_arc_points(state.pos, target, center, clockwise);
         let mut prev = state.pos;
         for pt in pts {
-            emit_subdiv(prev, pt, false, state.feed, hmap, src, out_lines, out_src);
+            e.segment(prev, pt, false, state.feed);
             prev = pt;
         }
     }
 
     state.pos = target;
-}
-
-fn emit_subdiv(
-    start: Vec3,
-    end: Vec3,
-    rapid: bool,
-    feed: f32,
-    hmap: &HeightMap,
-    src: usize,
-    out_lines: &mut Vec<String>,
-    out_src: &mut Vec<usize>,
-) {
-    let dx = end.x - start.x;
-    let dy = end.y - start.y;
-    let xy_len = (dx * dx + dy * dy).sqrt();
-    let n = if xy_len < 0.001 {
-        1
-    } else {
-        (xy_len / CHUNK_MM).ceil() as usize
-    };
-
-    for k in 1..=n {
-        let t = k as f32 / n as f32;
-        let sub = start.lerp(end, t);
-        let dz = hmap.dz(sub.x, sub.y);
-        let z_total = sub.z + dz;
-        let line = if rapid {
-            format!("G90 G21 G0 X{:.3} Y{:.3} Z{:.4}", sub.x, sub.y, z_total)
-        } else if feed > 0.0 {
-            format!(
-                "G90 G21 G1 X{:.3} Y{:.3} Z{:.4} F{:.1}",
-                sub.x, sub.y, z_total, feed
-            )
-        } else {
-            format!("G90 G21 G1 X{:.3} Y{:.3} Z{:.4}", sub.x, sub.y, z_total)
-        };
-        out_lines.push(line);
-        out_src.push(src);
-    }
 }
 
 fn format_word(w: &Word) -> String {
@@ -264,7 +275,7 @@ mod tests {
     #[test]
     fn no_heightmap_is_identity() {
         let input = lines(&["G90 G21", "G0 X10", "G1 X20 F100", "M3 S1000"]);
-        let (out, src) = transform_for_stream(&input, None);
+        let (out, src) = transform_for_stream(&input, None, Orientation::default());
         assert_eq!(out, input);
         assert_eq!(src, vec![0, 1, 2, 3]);
     }
@@ -273,7 +284,7 @@ mod tests {
     fn flat_map_preserves_z_at_end_of_move() {
         let m = flat_map();
         let input = lines(&["G90 G21", "G1 X10 Y0 Z-0.1 F200"]);
-        let (out, _src) = transform_for_stream(&input, Some(&m));
+        let (out, _src) = transform_for_stream(&input, Some(&m), Orientation::default());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X10.000"), "{last}");
         assert!(last.contains("Z-0.1000"), "{last}");
@@ -283,7 +294,7 @@ mod tests {
     fn tilt_map_offsets_z_along_x() {
         let m = tilt_map();
         let input = lines(&["G90 G21", "G1 X50 Y0 Z0 F200"]);
-        let (out, _) = transform_for_stream(&input, Some(&m));
+        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
         let last_motion = out
             .iter()
             .rev()
@@ -299,7 +310,7 @@ mod tests {
     fn subdivision_count_matches_chunk_size() {
         let m = flat_map();
         let input = lines(&["G90 G21", "G1 X10 Y0 F100"]);
-        let (out, _) = transform_for_stream(&input, Some(&m));
+        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
         assert_eq!(out.iter().filter(|l| l.contains("G1")).count(), 10);
     }
 
@@ -307,7 +318,7 @@ mod tests {
     fn z_only_move_emits_single_line() {
         let m = tilt_map();
         let input = lines(&["G90 G21", "G0 X25 Y25", "G1 Z-0.1 F100"]);
-        let (out, _) = transform_for_stream(&input, Some(&m));
+        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
         let z_lines: Vec<_> = out
             .iter()
             .filter(|l| l.contains("G1") && !l.contains("F100"))
@@ -324,7 +335,7 @@ mod tests {
     fn passes_through_non_motion_lines() {
         let m = flat_map();
         let input = lines(&["G90 G21", "M3 S1000", "G1 X1 F100", "M5"]);
-        let (out, _) = transform_for_stream(&input, Some(&m));
+        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
         assert!(out.iter().any(|l| l == "M3 S1000"));
         assert!(out.iter().any(|l| l == "M5"));
     }
@@ -333,7 +344,7 @@ mod tests {
     fn incremental_mode_resolved_to_absolute() {
         let m = flat_map();
         let input = lines(&["G91", "G1 X5 Y0 F100", "G1 X5 Y0"]);
-        let (out, _) = transform_for_stream(&input, Some(&m));
+        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X10.000"));
     }
@@ -342,7 +353,7 @@ mod tests {
     fn inch_mode_scales_to_mm() {
         let m = flat_map();
         let input = lines(&["G20", "G1 X1 Y0 F100"]);
-        let (out, _) = transform_for_stream(&input, Some(&m));
+        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X25.400"));
     }
@@ -351,9 +362,63 @@ mod tests {
     fn source_line_indices_track_original() {
         let m = flat_map();
         let input = lines(&["G90 G21", "G1 X10 Y0 F100", "M5"]);
-        let (out, src) = transform_for_stream(&input, Some(&m));
+        let (out, src) = transform_for_stream(&input, Some(&m), Orientation::default());
         assert_eq!(src.len(), out.len());
         let m5_idx = out.iter().position(|l| l == "M5").unwrap();
         assert_eq!(src[m5_idx], 2);
+    }
+
+    #[test]
+    fn transpose_swaps_x_and_y() {
+        let input = lines(&["G90 G21", "G1 X10 Y3 F100"]);
+        let (out, _) = transform_for_stream(&input, None, Orientation::Transpose);
+        let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
+        assert!(last.contains("X3.000"), "{last}");
+        assert!(last.contains("Y10.000"), "{last}");
+    }
+
+    #[test]
+    fn r90_rotates_into_negative_x() {
+        let input = lines(&["G90 G21", "G1 X10 Y0 F100"]);
+        let (out, _) = transform_for_stream(&input, None, Orientation::R90);
+        let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
+        assert!(last.contains("Y10.000"), "{last}");
+        assert!(last.contains("X-0.000") || last.contains("X0.000"), "{last}");
+    }
+
+    #[test]
+    fn r180_negates_both() {
+        let input = lines(&["G90 G21", "G1 X7 Y4 F100"]);
+        let (out, _) = transform_for_stream(&input, None, Orientation::R180);
+        let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
+        assert!(last.contains("X-7.000"), "{last}");
+        assert!(last.contains("Y-4.000"), "{last}");
+    }
+
+    #[test]
+    fn rotation_without_heightmap_does_not_subdivide() {
+        let input = lines(&["G90 G21", "G1 X10 Y0 F100"]);
+        let (out, _) = transform_for_stream(&input, None, Orientation::R90);
+        assert_eq!(out.iter().filter(|l| l.contains("G1")).count(), 1);
+    }
+
+    #[test]
+    fn heightmap_dz_queried_in_rotated_coords() {
+        let m = HeightMap::new((0.0, 0.0), (50.0, 50.0), 2, 2, vec![0.0, 0.0, 0.0, 0.5]).unwrap();
+        let input = lines(&["G90 G21", "G1 X50 Y50 F100"]);
+        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::Transpose);
+        let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
+        assert!(last.contains("X50.000"), "{last}");
+        assert!(last.contains("Y50.000"), "{last}");
+        assert!(last.contains("Z0.5000"), "{last}");
+    }
+
+    #[test]
+    fn mirror_x_negates_x_only() {
+        let input = lines(&["G90 G21", "G1 X10 Y5 F100"]);
+        let (out, _) = transform_for_stream(&input, None, Orientation::MirrorX);
+        let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
+        assert!(last.contains("X-10.000"), "{last}");
+        assert!(last.contains("Y5.000"), "{last}");
     }
 }

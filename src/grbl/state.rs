@@ -78,10 +78,113 @@ use crate::grbl::heightmap::HeightMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum Orientation {
+    #[default]
+    R0,
+    R90,
+    R180,
+    R270,
+    Transpose,
+    AntiTranspose,
+    MirrorX,
+    MirrorY,
+}
+
+impl Orientation {
+    pub const ALL: [Orientation; 8] = [
+        Orientation::R0,
+        Orientation::R90,
+        Orientation::R180,
+        Orientation::R270,
+        Orientation::Transpose,
+        Orientation::AntiTranspose,
+        Orientation::MirrorX,
+        Orientation::MirrorY,
+    ];
+
+    pub fn is_identity(self) -> bool {
+        matches!(self, Orientation::R0)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Orientation::R0 => "R0",
+            Orientation::R90 => "R90",
+            Orientation::R180 => "R180",
+            Orientation::R270 => "R270",
+            Orientation::Transpose => "T",
+            Orientation::AntiTranspose => "AT",
+            Orientation::MirrorX => "MX",
+            Orientation::MirrorY => "MY",
+        }
+    }
+
+    pub fn apply_xy(self, x: f32, y: f32) -> (f32, f32) {
+        match self {
+            Orientation::R0 => (x, y),
+            Orientation::R90 => (-y, x),
+            Orientation::R180 => (-x, -y),
+            Orientation::R270 => (y, -x),
+            Orientation::Transpose => (y, x),
+            Orientation::AntiTranspose => (-y, -x),
+            Orientation::MirrorX => (-x, y),
+            Orientation::MirrorY => (x, -y),
+        }
+    }
+
+    pub fn apply(self, v: Vec3) -> Vec3 {
+        let (x, y) = self.apply_xy(v.x, v.y);
+        Vec3 { x, y, z: v.z }
+    }
+}
+
+pub fn rotate_segments(segs: &[Segment], orient: Orientation) -> Vec<Segment> {
+    if orient.is_identity() {
+        return segs.to_vec();
+    }
+    segs.iter()
+        .map(|s| Segment {
+            start: orient.apply(s.start),
+            end: orient.apply(s.end),
+            rapid: s.rapid,
+            line: s.line,
+        })
+        .collect()
+}
+
+pub fn compute_segments_bounds(segs: &[Segment]) -> (Vec3, Vec3) {
+    let mut bmin = Vec3 {
+        x: f32::MAX,
+        y: f32::MAX,
+        z: f32::MAX,
+    };
+    let mut bmax = Vec3 {
+        x: f32::MIN,
+        y: f32::MIN,
+        z: f32::MIN,
+    };
+    let mut update = |v: Vec3| {
+        bmin.x = bmin.x.min(v.x);
+        bmin.y = bmin.y.min(v.y);
+        bmin.z = bmin.z.min(v.z);
+        bmax.x = bmax.x.max(v.x);
+        bmax.y = bmax.y.max(v.y);
+        bmax.z = bmax.z.max(v.z);
+    };
+    update(Vec3::default());
+    for s in segs {
+        update(s.start);
+        update(s.end);
+    }
+    (bmin, bmax)
+}
+
 #[derive(Debug)]
 pub struct TransformCache {
     pub lines: Arc<Vec<String>>,
     pub heightmap: Option<Arc<HeightMap>>,
+    pub orientation: Orientation,
     pub transformed: Vec<String>,
     pub src: Vec<usize>,
 }
@@ -104,6 +207,7 @@ pub struct JobState {
     pub line_map_modified: Arc<Vec<bool>>,
     pub pass_tolerance_mm: f32,
     pub version: usize,
+    pub orientation: Orientation,
     pub heightmap: Option<Arc<HeightMap>>,
     pub transform_cache: Option<Arc<TransformCache>>,
 }

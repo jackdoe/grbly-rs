@@ -71,7 +71,7 @@ impl Scene {
     pub fn new(context: &Context) -> Self {
         Self {
             grid: build_grid(context, 200.0, 200.0),
-            triad: build_triad(context),
+            triad: build_axes(context, 200.0),
             machine_box: None,
             toolpath: None,
             gantry: None,
@@ -426,40 +426,143 @@ fn build_grid(context: &Context, x_span: f32, y_span: f32) -> Gm<Mesh, ColorMate
     lb.build(context)
 }
 
-fn build_triad(context: &Context) -> Gm<Mesh, ColorMaterial> {
-    let len = 15.0f32;
+fn build_axes(context: &Context, grid_span: f32) -> Gm<Mesh, ColorMaterial> {
+    let red = Srgba::new(0xff, 0x55, 0x55, 0xff);
+    let green = Srgba::new(0x55, 0xff, 0x55, 0xff);
+    let blue = Srgba::new(0x55, 0x88, 0xff, 0xff);
+    let red_dim = Srgba::new(0xff, 0x55, 0x55, 0x88);
+    let green_dim = Srgba::new(0x55, 0xff, 0x55, 0x88);
+
+    let arrow_len = 30.0_f32;
+    let head = 4.0_f32;
+    let z_lift = 0.05_f32;
+
     let mut lb = LineBuilder::new();
+
+    let x0 = V3 { x: 0.0, y: 0.0, z: z_lift };
+    let x_tip = V3 { x: arrow_len, y: 0.0, z: z_lift };
+    lb.add(x0, x_tip, red, THICK_W * 1.4);
     lb.add(
-        V3::default(),
-        V3 {
-            x: len,
-            y: 0.0,
-            z: 0.0,
-        },
-        Srgba::new(0xff, 0x55, 0x55, 0xff),
+        x_tip,
+        V3 { x: arrow_len - head, y: head * 0.6, z: z_lift },
+        red,
         THICK_W,
     );
     lb.add(
-        V3::default(),
-        V3 {
-            x: 0.0,
-            y: len,
-            z: 0.0,
-        },
-        Srgba::new(0x55, 0xff, 0x55, 0xff),
+        x_tip,
+        V3 { x: arrow_len - head, y: -head * 0.6, z: z_lift },
+        red,
+        THICK_W,
+    );
+    draw_letter_xy(
+        &mut lb,
+        'X',
+        V3 { x: arrow_len + 4.0, y: -3.0, z: z_lift },
+        6.0,
+        red,
+    );
+
+    let y_tip = V3 { x: 0.0, y: arrow_len, z: z_lift };
+    lb.add(x0, y_tip, green, THICK_W * 1.4);
+    lb.add(
+        y_tip,
+        V3 { x: head * 0.6, y: arrow_len - head, z: z_lift },
+        green,
         THICK_W,
     );
     lb.add(
-        V3::default(),
-        V3 {
-            x: 0.0,
-            y: 0.0,
-            z: len,
-        },
-        Srgba::new(0x55, 0x88, 0xff, 0xff),
+        y_tip,
+        V3 { x: -head * 0.6, y: arrow_len - head, z: z_lift },
+        green,
         THICK_W,
     );
+    draw_letter_xy(
+        &mut lb,
+        'Y',
+        V3 { x: -3.0, y: arrow_len + 4.0, z: z_lift },
+        6.0,
+        green,
+    );
+
+    let z_tip = V3 { x: 0.0, y: 0.0, z: 20.0 };
+    lb.add(V3::default(), z_tip, blue, THICK_W);
+    lb.add(z_tip, V3 { x: 1.5, y: 0.0, z: 18.0 }, blue, THICK_W);
+    lb.add(z_tip, V3 { x: -1.5, y: 0.0, z: 18.0 }, blue, THICK_W);
+    draw_letter_xz(
+        &mut lb,
+        'Z',
+        V3 { x: -3.0, y: 0.0, z: 22.0 },
+        5.0,
+        blue,
+    );
+
+    let far = (grid_span - 15.0).max(arrow_len + 20.0);
+    let big = 12.0_f32;
+    draw_letter_xy(
+        &mut lb,
+        'X',
+        V3 { x: far, y: -big - 3.0, z: z_lift },
+        big,
+        red_dim,
+    );
+    draw_letter_xy(
+        &mut lb,
+        'Y',
+        V3 { x: -big - 3.0, y: far, z: z_lift },
+        big,
+        green_dim,
+    );
+
     lb.build(context)
+}
+
+fn letter_strokes(ch: char) -> &'static [(f32, f32, f32, f32)] {
+    match ch {
+        'X' => &[(0.0, 0.0, 1.0, 1.0), (0.0, 1.0, 1.0, 0.0)],
+        'Y' => &[
+            (0.0, 1.0, 0.5, 0.5),
+            (1.0, 1.0, 0.5, 0.5),
+            (0.5, 0.5, 0.5, 0.0),
+        ],
+        'Z' => &[
+            (0.0, 1.0, 1.0, 1.0),
+            (1.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+        ],
+        _ => &[],
+    }
+}
+
+fn draw_letter_xy(lb: &mut LineBuilder, ch: char, pos: V3, size: f32, color: Srgba) {
+    for &(x1, y1, x2, y2) in letter_strokes(ch) {
+        let p1 = V3 {
+            x: pos.x + x1 * size,
+            y: pos.y + y1 * size,
+            z: pos.z,
+        };
+        let p2 = V3 {
+            x: pos.x + x2 * size,
+            y: pos.y + y2 * size,
+            z: pos.z,
+        };
+        lb.add(p1, p2, color, LINE_W * 1.5);
+    }
+}
+
+fn draw_letter_xz(lb: &mut LineBuilder, ch: char, pos: V3, size: f32, color: Srgba) {
+    for &(x1, y1, x2, y2) in letter_strokes(ch) {
+        let p1 = V3 {
+            x: pos.x + x1 * size,
+            y: pos.y,
+            z: pos.z + y1 * size,
+        };
+        let p2 = V3 {
+            x: pos.x + x2 * size,
+            y: pos.y,
+            z: pos.z + y2 * size,
+        };
+        lb.add(p1, p2, color, LINE_W * 1.5);
+    }
 }
 
 fn build_probe_points(context: &Context, p: &ProbePreview) -> Option<Gm<Mesh, ColorMaterial>> {

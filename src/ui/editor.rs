@@ -35,7 +35,26 @@ fn load_file(path: &Path, job_lock: &RwLock<JobState>) -> Result<LoadReport, Str
     let content =
         std::fs::read_to_string(path).map_err(|err| format!("Failed to read file: {err}"))?;
     let lines: Vec<String> = content.lines().map(String::from).collect();
-    let (segs, bmin, bmax) = gcode::parser::parse_with_bounds(&lines);
+    let (raw_segs, _, _) = gcode::parser::parse_with_bounds(&lines);
+
+    let report = LoadReport {
+        line_count: lines.len(),
+        segment_count: raw_segs.len(),
+    };
+
+    let mut j = job_lock.write();
+    install_geometry(&mut j, Arc::new(lines), raw_segs, Orientation::default());
+    Ok(report)
+}
+
+fn install_geometry(
+    j: &mut JobState,
+    lines: Arc<Vec<String>>,
+    raw_segs: Vec<Segment>,
+    orientation: Orientation,
+) {
+    let segs = rotate_segments(&raw_segs, orientation);
+    let (bmin, bmax) = compute_segments_bounds(&segs);
     let total_dist: f32 = segs.iter().map(|s| s.start.dist(s.end)).sum();
 
     let mut line_has_rapid = vec![false; lines.len()];
@@ -45,14 +64,8 @@ fn load_file(path: &Path, job_lock: &RwLock<JobState>) -> Result<LoadReport, Str
         }
     }
     let line_has_z: Vec<bool> = lines.iter().map(|l| has_word(l, b'Z')).collect();
-
-    let report = LoadReport {
-        line_count: lines.len(),
-        segment_count: segs.len(),
-    };
-
-    let mut j = job_lock.write();
     let line_map_modified = compute_line_map_modified(&segs, lines.len(), j.heightmap.as_deref());
+
     j.seg_violations = Arc::new(vec![false; segs.len()]);
     j.violated_lines = Arc::new(vec![false; lines.len()]);
     j.seg_pass_counts = Arc::new(vec![1; segs.len()]);
@@ -61,17 +74,37 @@ fn load_file(path: &Path, job_lock: &RwLock<JobState>) -> Result<LoadReport, Str
     j.line_has_rapid = Arc::new(line_has_rapid);
     j.line_map_modified = Arc::new(line_map_modified);
     j.pass_tolerance_mm = 0.0;
-    j.lines = Arc::new(lines);
+    j.lines = lines;
     j.segments = Arc::new(segs);
     j.bounds_min = bmin;
     j.bounds_max = bmax;
     j.total_dist = total_dist;
+    j.orientation = orientation;
     j.transform_cache = None;
     j.version = j.version.wrapping_add(1);
     j.status = JobStatus::Idle;
     j.current_line = 0;
+}
 
-    Ok(report)
+fn apply_orientation_change(
+    job_lock: &Arc<RwLock<JobState>>,
+    engine: &Arc<Engine>,
+    new_orient: Orientation,
+) {
+    let lines = {
+        let j = job_lock.read();
+        if j.orientation == new_orient {
+            return;
+        }
+        j.lines.clone()
+    };
+    let (raw_segs, _, _) = gcode::parser::parse_with_bounds(&lines);
+    let mut j = job_lock.write();
+    if j.heightmap.is_some() {
+        engine.log("orientation changed: heightmap cleared (re-probe needed)".into());
+        j.heightmap = None;
+    }
+    install_geometry(&mut j, lines, raw_segs, new_orient);
 }
 
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
@@ -203,6 +236,7 @@ pub fn draw(ui: &mut egui::Ui, args: DrawArgs<'_>) {
     if has_lines {
         draw_progress(ui, state, jstate);
         draw_navigation(ui, state, jstate);
+        draw_orientation(ui, engine, jstate, job_lock);
     }
 
     if jstate.lines.is_empty() {
@@ -670,6 +704,32 @@ fn draw_navigation(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobState
                     .speed(0.01)
                     .suffix(" mm"),
             );
+        }
+    });
+}
+
+fn draw_orientation(
+    ui: &mut egui::Ui,
+    engine: &Arc<Engine>,
+    jstate: &JobState,
+    job_lock: &Arc<RwLock<JobState>>,
+) {
+    let current = jstate.orientation;
+    let locked = matches!(jstate.status, JobStatus::Running | JobStatus::Paused);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("ROT").size(10.0).color(DIM));
+        for orient in Orientation::ALL {
+            let selected = current == orient;
+            let resp = ui.add_enabled(
+                !locked,
+                egui::SelectableLabel::new(
+                    selected,
+                    egui::RichText::new(orient.label()).size(11.0),
+                ),
+            );
+            if resp.clicked() && !selected {
+                apply_orientation_change(job_lock, engine, orient);
+            }
         }
     });
 }

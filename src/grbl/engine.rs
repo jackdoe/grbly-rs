@@ -655,25 +655,32 @@ impl Engine {
         {
             let j = self.job.read();
             if let Some(c) = &j.transform_cache {
-                if Arc::ptr_eq(&c.lines, &j.lines) && hmap_ptr_eq(&c.heightmap, &j.heightmap) {
+                if Arc::ptr_eq(&c.lines, &j.lines)
+                    && hmap_ptr_eq(&c.heightmap, &j.heightmap)
+                    && c.orientation == j.orientation
+                {
                     return c.clone();
                 }
             }
         }
-        let (lines_arc, hmap) = {
+        let (lines_arc, hmap, orient) = {
             let j = self.job.read();
-            (j.lines.clone(), j.heightmap.clone())
+            (j.lines.clone(), j.heightmap.clone(), j.orientation)
         };
-        let (transformed, src) = transform_for_stream(&lines_arc[..], hmap.as_deref());
+        let (transformed, src) = transform_for_stream(&lines_arc[..], hmap.as_deref(), orient);
         let cache = Arc::new(TransformCache {
             lines: lines_arc.clone(),
             heightmap: hmap.clone(),
+            orientation: orient,
             transformed,
             src,
         });
         {
             let mut j = self.job.write();
-            if Arc::ptr_eq(&j.lines, &lines_arc) && hmap_ptr_eq(&j.heightmap, &hmap) {
+            if Arc::ptr_eq(&j.lines, &lines_arc)
+                && hmap_ptr_eq(&j.heightmap, &hmap)
+                && j.orientation == orient
+            {
                 j.transform_cache = Some(cache.clone());
             }
         }
