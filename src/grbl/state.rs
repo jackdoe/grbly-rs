@@ -132,6 +132,24 @@ impl Orientation {
             Orientation::MirrorY => (x, -y),
         }
     }
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Placement {
+    pub orientation: Orientation,
+    pub offset_x: f32,
+    pub offset_y: f32,
+}
+
+impl Placement {
+    pub fn is_identity(self) -> bool {
+        self.orientation.is_identity() && self.offset_x == 0.0 && self.offset_y == 0.0
+    }
+
+    pub fn apply_xy(self, x: f32, y: f32) -> (f32, f32) {
+        let (rx, ry) = self.orientation.apply_xy(x, y);
+        (rx + self.offset_x, ry + self.offset_y)
+    }
 
     pub fn apply(self, v: Vec3) -> Vec3 {
         let (x, y) = self.apply_xy(v.x, v.y);
@@ -139,14 +157,24 @@ impl Orientation {
     }
 }
 
-pub fn rotate_segments(segs: &[Segment], orient: Orientation) -> Vec<Segment> {
-    if orient.is_identity() {
+impl From<Orientation> for Placement {
+    fn from(orientation: Orientation) -> Self {
+        Self {
+            orientation,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        }
+    }
+}
+
+pub fn place_segments(segs: &[Segment], placement: Placement) -> Vec<Segment> {
+    if placement.is_identity() {
         return segs.to_vec();
     }
     segs.iter()
         .map(|s| Segment {
-            start: orient.apply(s.start),
-            end: orient.apply(s.end),
+            start: placement.apply(s.start),
+            end: placement.apply(s.end),
             rapid: s.rapid,
             line: s.line,
         })
@@ -184,7 +212,7 @@ pub fn compute_segments_bounds(segs: &[Segment]) -> (Vec3, Vec3) {
 pub struct TransformCache {
     pub lines: Arc<Vec<String>>,
     pub heightmap: Option<Arc<HeightMap>>,
-    pub orientation: Orientation,
+    pub placement: Placement,
     pub transformed: Vec<String>,
     pub src: Vec<usize>,
 }
@@ -207,7 +235,7 @@ pub struct JobState {
     pub line_map_modified: Arc<Vec<bool>>,
     pub pass_tolerance_mm: f32,
     pub version: usize,
-    pub orientation: Orientation,
+    pub placement: Placement,
     pub heightmap: Option<Arc<HeightMap>>,
     pub transform_cache: Option<Arc<TransformCache>>,
 }

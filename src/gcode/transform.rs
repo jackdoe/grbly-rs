@@ -1,7 +1,7 @@
 use crate::gcode::parser::{arc_center_from_radius, tessellate_arc_points};
 use crate::gcode::words::{parse_words, strip_comments, Word};
 use crate::grbl::heightmap::HeightMap;
-use crate::grbl::state::{Orientation, Vec3};
+use crate::grbl::state::{Placement, Vec3};
 
 const CHUNK_MM: f32 = 1.0;
 
@@ -27,7 +27,7 @@ impl Default for ModalState {
 
 struct Emit<'a> {
     hmap: Option<&'a HeightMap>,
-    orient: Orientation,
+    placement: Placement,
     src: usize,
     out_lines: &'a mut Vec<String>,
     out_src: &'a mut Vec<usize>,
@@ -57,7 +57,7 @@ impl<'a> Emit<'a> {
         for k in 1..=n {
             let t = k as f32 / n as f32;
             let sub = start.lerp(end, t);
-            let (rx, ry) = self.orient.apply_xy(sub.x, sub.y);
+            let (rx, ry) = self.placement.apply_xy(sub.x, sub.y);
             let dz = self.hmap.map(|m| m.dz(rx, ry)).unwrap_or(0.0);
             let z_total = sub.z + dz;
             let line = if rapid {
@@ -79,9 +79,9 @@ impl<'a> Emit<'a> {
 pub fn transform_for_stream(
     lines: &[String],
     heightmap: Option<&HeightMap>,
-    orientation: Orientation,
+    placement: Placement,
 ) -> (Vec<String>, Vec<usize>) {
-    if heightmap.is_none() && orientation.is_identity() {
+    if heightmap.is_none() && placement.is_identity() {
         let src: Vec<usize> = (0..lines.len()).collect();
         return (lines.to_vec(), src);
     }
@@ -97,7 +97,7 @@ pub fn transform_for_stream(
         }
         let mut emit = Emit {
             hmap: heightmap,
-            orient: orientation,
+            placement,
             src: i,
             out_lines: &mut out_lines,
             out_src: &mut out_src,
@@ -252,6 +252,7 @@ fn format_word(w: &Word) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grbl::state::Orientation;
 
     fn flat_map() -> HeightMap {
         HeightMap::new((0.0, 0.0), (50.0, 50.0), 2, 2, vec![0.0; 4]).unwrap()
@@ -275,7 +276,7 @@ mod tests {
     #[test]
     fn no_heightmap_is_identity() {
         let input = lines(&["G90 G21", "G0 X10", "G1 X20 F100", "M3 S1000"]);
-        let (out, src) = transform_for_stream(&input, None, Orientation::default());
+        let (out, src) = transform_for_stream(&input, None, Placement::default());
         assert_eq!(out, input);
         assert_eq!(src, vec![0, 1, 2, 3]);
     }
@@ -284,7 +285,7 @@ mod tests {
     fn flat_map_preserves_z_at_end_of_move() {
         let m = flat_map();
         let input = lines(&["G90 G21", "G1 X10 Y0 Z-0.1 F200"]);
-        let (out, _src) = transform_for_stream(&input, Some(&m), Orientation::default());
+        let (out, _src) = transform_for_stream(&input, Some(&m), Placement::default());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X10.000"), "{last}");
         assert!(last.contains("Z-0.1000"), "{last}");
@@ -294,7 +295,7 @@ mod tests {
     fn tilt_map_offsets_z_along_x() {
         let m = tilt_map();
         let input = lines(&["G90 G21", "G1 X50 Y0 Z0 F200"]);
-        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
+        let (out, _) = transform_for_stream(&input, Some(&m), Placement::default());
         let last_motion = out
             .iter()
             .rev()
@@ -310,7 +311,7 @@ mod tests {
     fn subdivision_count_matches_chunk_size() {
         let m = flat_map();
         let input = lines(&["G90 G21", "G1 X10 Y0 F100"]);
-        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
+        let (out, _) = transform_for_stream(&input, Some(&m), Placement::default());
         assert_eq!(out.iter().filter(|l| l.contains("G1")).count(), 10);
     }
 
@@ -318,7 +319,7 @@ mod tests {
     fn z_only_move_emits_single_line() {
         let m = tilt_map();
         let input = lines(&["G90 G21", "G0 X25 Y25", "G1 Z-0.1 F100"]);
-        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
+        let (out, _) = transform_for_stream(&input, Some(&m), Placement::default());
         let z_lines: Vec<_> = out
             .iter()
             .filter(|l| l.contains("G1") && !l.contains("F100"))
@@ -335,7 +336,7 @@ mod tests {
     fn passes_through_non_motion_lines() {
         let m = flat_map();
         let input = lines(&["G90 G21", "M3 S1000", "G1 X1 F100", "M5"]);
-        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
+        let (out, _) = transform_for_stream(&input, Some(&m), Placement::default());
         assert!(out.iter().any(|l| l == "M3 S1000"));
         assert!(out.iter().any(|l| l == "M5"));
     }
@@ -344,7 +345,7 @@ mod tests {
     fn incremental_mode_resolved_to_absolute() {
         let m = flat_map();
         let input = lines(&["G91", "G1 X5 Y0 F100", "G1 X5 Y0"]);
-        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
+        let (out, _) = transform_for_stream(&input, Some(&m), Placement::default());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X10.000"));
     }
@@ -353,7 +354,7 @@ mod tests {
     fn inch_mode_scales_to_mm() {
         let m = flat_map();
         let input = lines(&["G20", "G1 X1 Y0 F100"]);
-        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::default());
+        let (out, _) = transform_for_stream(&input, Some(&m), Placement::default());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X25.400"));
     }
@@ -362,7 +363,7 @@ mod tests {
     fn source_line_indices_track_original() {
         let m = flat_map();
         let input = lines(&["G90 G21", "G1 X10 Y0 F100", "M5"]);
-        let (out, src) = transform_for_stream(&input, Some(&m), Orientation::default());
+        let (out, src) = transform_for_stream(&input, Some(&m), Placement::default());
         assert_eq!(src.len(), out.len());
         let m5_idx = out.iter().position(|l| l == "M5").unwrap();
         assert_eq!(src[m5_idx], 2);
@@ -371,7 +372,7 @@ mod tests {
     #[test]
     fn transpose_swaps_x_and_y() {
         let input = lines(&["G90 G21", "G1 X10 Y3 F100"]);
-        let (out, _) = transform_for_stream(&input, None, Orientation::Transpose);
+        let (out, _) = transform_for_stream(&input, None, Orientation::Transpose.into());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X3.000"), "{last}");
         assert!(last.contains("Y10.000"), "{last}");
@@ -380,7 +381,7 @@ mod tests {
     #[test]
     fn r90_rotates_into_negative_x() {
         let input = lines(&["G90 G21", "G1 X10 Y0 F100"]);
-        let (out, _) = transform_for_stream(&input, None, Orientation::R90);
+        let (out, _) = transform_for_stream(&input, None, Orientation::R90.into());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("Y10.000"), "{last}");
         assert!(last.contains("X-0.000") || last.contains("X0.000"), "{last}");
@@ -389,7 +390,7 @@ mod tests {
     #[test]
     fn r180_negates_both() {
         let input = lines(&["G90 G21", "G1 X7 Y4 F100"]);
-        let (out, _) = transform_for_stream(&input, None, Orientation::R180);
+        let (out, _) = transform_for_stream(&input, None, Orientation::R180.into());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X-7.000"), "{last}");
         assert!(last.contains("Y-4.000"), "{last}");
@@ -398,7 +399,7 @@ mod tests {
     #[test]
     fn rotation_without_heightmap_does_not_subdivide() {
         let input = lines(&["G90 G21", "G1 X10 Y0 F100"]);
-        let (out, _) = transform_for_stream(&input, None, Orientation::R90);
+        let (out, _) = transform_for_stream(&input, None, Orientation::R90.into());
         assert_eq!(out.iter().filter(|l| l.contains("G1")).count(), 1);
     }
 
@@ -406,7 +407,7 @@ mod tests {
     fn heightmap_dz_queried_in_rotated_coords() {
         let m = HeightMap::new((0.0, 0.0), (50.0, 50.0), 2, 2, vec![0.0, 0.0, 0.0, 0.5]).unwrap();
         let input = lines(&["G90 G21", "G1 X50 Y50 F100"]);
-        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::Transpose);
+        let (out, _) = transform_for_stream(&input, Some(&m), Orientation::Transpose.into());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X50.000"), "{last}");
         assert!(last.contains("Y50.000"), "{last}");
@@ -414,9 +415,23 @@ mod tests {
     }
 
     #[test]
+    fn offset_shifts_after_rotation() {
+        let input = lines(&["G90 G21", "G1 X10 Y3 F100"]);
+        let placement = Placement {
+            orientation: Orientation::Transpose,
+            offset_x: 5.0,
+            offset_y: -2.0,
+        };
+        let (out, _) = transform_for_stream(&input, None, placement);
+        let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
+        assert!(last.contains("X8.000"), "{last}");
+        assert!(last.contains("Y8.000"), "{last}");
+    }
+
+    #[test]
     fn mirror_x_negates_x_only() {
         let input = lines(&["G90 G21", "G1 X10 Y5 F100"]);
-        let (out, _) = transform_for_stream(&input, None, Orientation::MirrorX);
+        let (out, _) = transform_for_stream(&input, None, Orientation::MirrorX.into());
         let last = out.iter().rev().find(|l| l.contains("G1")).unwrap();
         assert!(last.contains("X-10.000"), "{last}");
         assert!(last.contains("Y5.000"), "{last}");

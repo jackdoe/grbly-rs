@@ -43,7 +43,7 @@ fn load_file(path: &Path, job_lock: &RwLock<JobState>) -> Result<LoadReport, Str
     };
 
     let mut j = job_lock.write();
-    install_geometry(&mut j, Arc::new(lines), raw_segs, Orientation::default());
+    install_geometry(&mut j, Arc::new(lines), raw_segs, Placement::default());
     Ok(report)
 }
 
@@ -51,9 +51,9 @@ fn install_geometry(
     j: &mut JobState,
     lines: Arc<Vec<String>>,
     raw_segs: Vec<Segment>,
-    orientation: Orientation,
+    placement: Placement,
 ) {
-    let segs = rotate_segments(&raw_segs, orientation);
+    let segs = place_segments(&raw_segs, placement);
     let (bmin, bmax) = compute_segments_bounds(&segs);
     let total_dist: f32 = segs.iter().map(|s| s.start.dist(s.end)).sum();
 
@@ -79,21 +79,21 @@ fn install_geometry(
     j.bounds_min = bmin;
     j.bounds_max = bmax;
     j.total_dist = total_dist;
-    j.orientation = orientation;
+    j.placement = placement;
     j.transform_cache = None;
     j.version = j.version.wrapping_add(1);
     j.status = JobStatus::Idle;
     j.current_line = 0;
 }
 
-fn apply_orientation_change(
+fn apply_placement_change(
     job_lock: &Arc<RwLock<JobState>>,
     engine: &Arc<Engine>,
-    new_orient: Orientation,
+    new_placement: Placement,
 ) {
     let lines = {
         let j = job_lock.read();
-        if j.orientation == new_orient {
+        if j.placement == new_placement {
             return;
         }
         j.lines.clone()
@@ -101,10 +101,10 @@ fn apply_orientation_change(
     let (raw_segs, _, _) = gcode::parser::parse_with_bounds(&lines);
     let mut j = job_lock.write();
     if j.heightmap.is_some() {
-        engine.log("orientation changed: heightmap cleared (re-probe needed)".into());
+        engine.log("placement changed: heightmap cleared (re-probe needed)".into());
         j.heightmap = None;
     }
-    install_geometry(&mut j, lines, raw_segs, new_orient);
+    install_geometry(&mut j, lines, raw_segs, new_placement);
 }
 
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
@@ -150,6 +150,7 @@ pub struct EditorState {
     pub pass_tolerance_mm: f32,
     pub show_heatmap: bool,
     pub manual_focus_line: Option<usize>,
+    pub offset_step: f32,
     load_receiver: Option<Receiver<LoadTaskResult>>,
     pass_receiver: Option<Receiver<PassTaskResult>>,
     live_start_confirm: Option<Instant>,
@@ -175,6 +176,7 @@ impl Default for EditorState {
             pass_tolerance_mm: DEFAULT_PASS_TOLERANCE_MM,
             show_heatmap: true,
             manual_focus_line: None,
+            offset_step: 1.0,
             load_receiver: None,
             pass_receiver: None,
             live_start_confirm: None,
@@ -236,7 +238,7 @@ pub fn draw(ui: &mut egui::Ui, args: DrawArgs<'_>) {
     if has_lines {
         draw_progress(ui, state, jstate);
         draw_navigation(ui, state, jstate);
-        draw_orientation(ui, engine, jstate, job_lock);
+        draw_placement(ui, engine, jstate, job_lock, state);
     }
 
     if jstate.lines.is_empty() {
@@ -708,18 +710,20 @@ fn draw_navigation(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobState
     });
 }
 
-fn draw_orientation(
+fn draw_placement(
     ui: &mut egui::Ui,
     engine: &Arc<Engine>,
     jstate: &JobState,
     job_lock: &Arc<RwLock<JobState>>,
+    state: &mut EditorState,
 ) {
-    let current = jstate.orientation;
+    let current = jstate.placement;
     let locked = matches!(jstate.status, JobStatus::Running | JobStatus::Paused);
+
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("ROT").size(10.0).color(DIM));
         for orient in Orientation::ALL {
-            let selected = current == orient;
+            let selected = current.orientation == orient;
             let resp = ui.add_enabled(
                 !locked,
                 egui::SelectableLabel::new(
@@ -728,8 +732,66 @@ fn draw_orientation(
                 ),
             );
             if resp.clicked() && !selected {
-                apply_orientation_change(job_lock, engine, orient);
+                apply_placement_change(
+                    job_lock,
+                    engine,
+                    Placement {
+                        orientation: orient,
+                        ..current
+                    },
+                );
             }
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("OFFSET").size(10.0).color(DIM));
+        let step = state.offset_step.max(0.001);
+        let nudge = |dx: f32, dy: f32| Placement {
+            orientation: current.orientation,
+            offset_x: current.offset_x + dx,
+            offset_y: current.offset_y + dy,
+        };
+        if ui.add_enabled(!locked, btn("\u{2190}")).clicked() {
+            apply_placement_change(job_lock, engine, nudge(-step, 0.0));
+        }
+        if ui.add_enabled(!locked, btn("\u{2192}")).clicked() {
+            apply_placement_change(job_lock, engine, nudge(step, 0.0));
+        }
+        if ui.add_enabled(!locked, btn("\u{2193}")).clicked() {
+            apply_placement_change(job_lock, engine, nudge(0.0, -step));
+        }
+        if ui.add_enabled(!locked, btn("\u{2191}")).clicked() {
+            apply_placement_change(job_lock, engine, nudge(0.0, step));
+        }
+        ui.separator();
+        ui.label(egui::RichText::new("STEP").size(10.0).color(DIM));
+        ui.add(
+            egui::DragValue::new(&mut state.offset_step)
+                .speed(0.1)
+                .range(0.01..=50.0)
+                .suffix(" mm"),
+        );
+        ui.separator();
+        ui.label(
+            egui::RichText::new(format!(
+                "\u{0394} X{:+.2} Y{:+.2}",
+                current.offset_x, current.offset_y
+            ))
+            .size(11.0)
+            .color(CYAN),
+        );
+        let zeroed = current.offset_x == 0.0 && current.offset_y == 0.0;
+        if ui.add_enabled(!locked && !zeroed, btn("ZERO")).clicked() {
+            apply_placement_change(
+                job_lock,
+                engine,
+                Placement {
+                    orientation: current.orientation,
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                },
+            );
         }
     });
 }
