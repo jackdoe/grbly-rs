@@ -11,6 +11,8 @@ use crate::gcode;
 use crate::gcode::words::has_word;
 use crate::grbl::engine::Engine;
 use crate::grbl::state::*;
+use crate::material::MaterialField;
+use crate::ui::scene::SceneVisibility;
 
 pub struct LoadReport {
     pub line_count: usize,
@@ -151,6 +153,10 @@ pub struct EditorState {
     pub show_heatmap: bool,
     pub manual_focus_line: Option<usize>,
     pub offset_step: f32,
+    pub endmill_diameter: f32,
+    pub material: Option<MaterialField>,
+    pub material_job_version: usize,
+    pub visibility: SceneVisibility,
     load_receiver: Option<Receiver<LoadTaskResult>>,
     pass_receiver: Option<Receiver<PassTaskResult>>,
     live_start_confirm: Option<Instant>,
@@ -177,6 +183,10 @@ impl Default for EditorState {
             show_heatmap: true,
             manual_focus_line: None,
             offset_step: 1.0,
+            endmill_diameter: 0.8,
+            material: None,
+            material_job_version: 0,
+            visibility: SceneVisibility::default(),
             load_receiver: None,
             pass_receiver: None,
             live_start_confirm: None,
@@ -233,6 +243,7 @@ pub fn draw(ui: &mut egui::Ui, args: DrawArgs<'_>) {
         },
     );
     advance_simulation(state, jstate, job_lock);
+    draw_visibility(ui, &mut state.visibility);
     draw_notices(ui, state);
 
     if has_lines {
@@ -582,6 +593,22 @@ fn draw_toolbar(ui: &mut egui::Ui, args: ToolbarArgs<'_>) {
     });
 }
 
+fn draw_visibility(ui: &mut egui::Ui, vis: &mut SceneVisibility) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(egui::RichText::new("SHOW").size(10.0).color(DIM));
+        ui.checkbox(&mut vis.grid, egui::RichText::new("GRID").size(11.0));
+        ui.checkbox(&mut vis.triad, egui::RichText::new("AXES").size(11.0));
+        ui.checkbox(&mut vis.machine_box, egui::RichText::new("MACHINE").size(11.0));
+        ui.checkbox(&mut vis.toolpath, egui::RichText::new("PATH").size(11.0));
+        ui.checkbox(&mut vis.bounds_box, egui::RichText::new("BBOX").size(11.0));
+        ui.checkbox(&mut vis.probe_points, egui::RichText::new("PROBE").size(11.0));
+        ui.checkbox(&mut vis.trail, egui::RichText::new("TRAIL").size(11.0));
+        ui.checkbox(&mut vis.gantry, egui::RichText::new("TOOL").size(11.0));
+        ui.checkbox(&mut vis.material, egui::RichText::new("STOCK").size(11.0));
+    });
+}
+
 fn draw_notices(ui: &mut egui::Ui, state: &EditorState) {
     if !state.warning.is_empty() {
         let frame = egui::Frame::default()
@@ -706,6 +733,18 @@ fn draw_navigation(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobState
                     .speed(0.01)
                     .suffix(" mm"),
             );
+        }
+        ui.separator();
+        ui.label(egui::RichText::new("ENDMILL").size(10.0).color(DIM));
+        let prev_diam = state.endmill_diameter;
+        ui.add(
+            egui::DragValue::new(&mut state.endmill_diameter)
+                .range(0.05..=12.0)
+                .speed(0.05)
+                .suffix(" mm"),
+        );
+        if (state.endmill_diameter - prev_diam).abs() > f32::EPSILON {
+            state.material = None;
         }
     });
 }
@@ -847,6 +886,32 @@ fn advance_simulation(
         state.sim_pos = seg.start.lerp(seg.end, state.sim_frac);
         state.sim_line = seg_to_line(segments, state.sim_seg);
     }
+
+    sync_material(state, jstate);
+}
+
+fn sync_material(state: &mut EditorState, jstate: &JobState) {
+    if !state.simulating || jstate.segments.is_empty() {
+        return;
+    }
+    let needs_rebuild = match &state.material {
+        None => true,
+        Some(m) => {
+            state.material_job_version != jstate.version
+                || (m.endmill_diameter - state.endmill_diameter).abs() > f32::EPSILON
+        }
+    };
+    if needs_rebuild {
+        state.material = Some(MaterialField::new(
+            jstate.bounds_min,
+            jstate.bounds_max,
+            state.endmill_diameter,
+        ));
+        state.material_job_version = jstate.version;
+    }
+    if let Some(field) = state.material.as_mut() {
+        field.carve_up_to(&jstate.segments, state.sim_seg);
+    }
 }
 
 fn reset_simulation(state: &mut EditorState) {
@@ -857,6 +922,7 @@ fn reset_simulation(state: &mut EditorState) {
     state.sim_line = 0;
     state.sim_pos = Vec3::default();
     state.sim_last_tick = Instant::now();
+    state.material = None;
 }
 
 fn step_simulation_line(state: &mut EditorState, jstate: &JobState) {
@@ -873,6 +939,7 @@ fn step_simulation_line(state: &mut EditorState, jstate: &JobState) {
     } else {
         state.sim_line = jstate.lines.len();
     }
+    sync_material(state, jstate);
 }
 
 fn draw_gcode_lines(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobState) {

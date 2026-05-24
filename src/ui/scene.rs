@@ -1,5 +1,6 @@
 use crate::grbl::heightmap::grid_point;
 use crate::grbl::state::{self, JobState, MachineState, Segment};
+use crate::material::MaterialField;
 use three_d::renderer::*;
 
 type V3 = state::Vec3;
@@ -14,6 +15,35 @@ pub struct ProbePreview {
     pub skipped: Vec<bool>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SceneVisibility {
+    pub grid: bool,
+    pub triad: bool,
+    pub machine_box: bool,
+    pub toolpath: bool,
+    pub bounds_box: bool,
+    pub probe_points: bool,
+    pub trail: bool,
+    pub gantry: bool,
+    pub material: bool,
+}
+
+impl Default for SceneVisibility {
+    fn default() -> Self {
+        Self {
+            grid: true,
+            triad: true,
+            machine_box: true,
+            toolpath: true,
+            bounds_box: true,
+            probe_points: true,
+            trail: true,
+            gantry: true,
+            material: true,
+        }
+    }
+}
+
 pub struct Scene {
     grid: Gm<Mesh, ColorMaterial>,
     triad: Gm<Mesh, ColorMaterial>,
@@ -23,6 +53,8 @@ pub struct Scene {
     trail: Option<Gm<Mesh, ColorMaterial>>,
     bounds_box: Option<Gm<Mesh, ColorMaterial>>,
     probe_points: Option<Gm<Mesh, ColorMaterial>>,
+    material: Option<Gm<Mesh, ColorMaterial>>,
+    visibility: SceneVisibility,
     trail_points: Vec<V3>,
     trail_dirty: bool,
     last_pos: V3,
@@ -33,6 +65,7 @@ pub struct Scene {
     last_max_travel: V3,
     last_show_heatmap: bool,
     last_probe_signature: ProbeSignature,
+    last_material_version: Option<u32>,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -53,6 +86,8 @@ pub struct SceneUpdate<'a> {
     pub jstate: &'a JobState,
     pub show_heatmap: bool,
     pub probe_preview: Option<ProbePreview>,
+    pub material: Option<&'a MaterialField>,
+    pub visibility: SceneVisibility,
 }
 
 const LINE_W: f32 = 0.3;
@@ -78,6 +113,8 @@ impl Scene {
             trail: None,
             bounds_box: None,
             probe_points: None,
+            material: None,
+            visibility: SceneVisibility::default(),
             trail_points: Vec::new(),
             trail_dirty: false,
             last_pos: V3::default(),
@@ -88,6 +125,7 @@ impl Scene {
             last_max_travel: V3::default(),
             last_show_heatmap: true,
             last_probe_signature: ProbeSignature::default(),
+            last_material_version: None,
         }
     }
 
@@ -99,7 +137,10 @@ impl Scene {
             jstate,
             show_heatmap,
             probe_preview,
+            material,
+            visibility,
         } = args;
+        self.visibility = visibility;
 
         let wpos = tool_pos;
         let wpos_changed = wpos != self.last_pos;
@@ -210,27 +251,57 @@ impl Scene {
             self.last_probe_signature = new_sig;
             self.probe_points = probe_preview.as_ref().and_then(|p| build_probe_points(context, p));
         }
+
+        let mat_version = material.map(|m| m.version);
+        if mat_version != self.last_material_version {
+            self.last_material_version = mat_version;
+            self.material = material.map(|m| build_material(context, m));
+        }
     }
 
     pub fn collect(&self) -> Vec<&Gm<Mesh, ColorMaterial>> {
-        let mut out: Vec<&Gm<Mesh, ColorMaterial>> = vec![&self.grid, &self.triad];
-        if let Some(ref v) = self.machine_box {
-            out.push(v);
+        let v = &self.visibility;
+        let mut out: Vec<&Gm<Mesh, ColorMaterial>> = Vec::new();
+        if v.grid {
+            out.push(&self.grid);
         }
-        if let Some(ref v) = self.toolpath {
-            out.push(v);
+        if v.triad {
+            out.push(&self.triad);
         }
-        if let Some(ref v) = self.bounds_box {
-            out.push(v);
+        if v.material {
+            if let Some(ref m) = self.material {
+                out.push(m);
+            }
         }
-        if let Some(ref v) = self.probe_points {
-            out.push(v);
+        if v.machine_box {
+            if let Some(ref m) = self.machine_box {
+                out.push(m);
+            }
         }
-        if let Some(ref v) = self.trail {
-            out.push(v);
+        if v.toolpath {
+            if let Some(ref m) = self.toolpath {
+                out.push(m);
+            }
         }
-        if let Some(ref v) = self.gantry {
-            out.push(v);
+        if v.bounds_box {
+            if let Some(ref m) = self.bounds_box {
+                out.push(m);
+            }
+        }
+        if v.probe_points {
+            if let Some(ref m) = self.probe_points {
+                out.push(m);
+            }
+        }
+        if v.trail {
+            if let Some(ref m) = self.trail {
+                out.push(m);
+            }
+        }
+        if v.gantry {
+            if let Some(ref m) = self.gantry {
+                out.push(m);
+            }
         }
         out
     }
@@ -817,4 +888,59 @@ fn depth_color(z: f32, zmin: f32, zmax: f32) -> Srgba {
         (255.0 - t * 119.0) as u8,
         0xff,
     )
+}
+
+fn build_material(context: &Context, field: &MaterialField) -> Gm<Mesh, ColorMaterial> {
+    let nx = field.nx;
+    let ny = field.ny;
+    let mut positions = Vec::with_capacity(nx * ny);
+    let mut colors = Vec::with_capacity(nx * ny);
+    for iy in 0..ny {
+        let y = field.bbox_min_y + (iy as f32 + 0.5) * field.res;
+        for ix in 0..nx {
+            let x = field.bbox_min_x + (ix as f32 + 0.5) * field.res;
+            let z = field.heights[iy * nx + ix];
+            positions.push(vec3(x, y, z));
+            colors.push(material_color(z, field.z_top, field.z_floor));
+        }
+    }
+    let mut indices = Vec::with_capacity((nx - 1) * (ny - 1) * 6);
+    for iy in 0..ny - 1 {
+        for ix in 0..nx - 1 {
+            let a = (iy * nx + ix) as u32;
+            let b = a + 1;
+            let c = a + nx as u32;
+            let d = c + 1;
+            indices.extend([a, c, d, a, d, b]);
+        }
+    }
+    let cpu_mesh = CpuMesh {
+        positions: Positions::F32(positions),
+        indices: Indices::U32(indices),
+        colors: Some(colors),
+        ..Default::default()
+    };
+    let mesh = Mesh::new(context, &cpu_mesh);
+    let material = ColorMaterial {
+        color: Srgba::WHITE,
+        is_transparent: true,
+        render_states: RenderStates {
+            blend: Blend::TRANSPARENCY,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    Gm::new(mesh, material)
+}
+
+fn material_color(z: f32, z_top: f32, z_floor: f32) -> Srgba {
+    if z >= z_top - 1e-4 {
+        return Srgba::new(0xc8, 0x96, 0x3e, 0xc0);
+    }
+    let span = (z_top - z_floor).max(0.05);
+    let t = ((z_top - z) / span).clamp(0.0, 1.0);
+    let r = (0xaa as f32 - t * 0x55 as f32) as u8;
+    let g = (0x55 as f32 - t * 0x33 as f32) as u8;
+    let b = (0x22 as f32 + t * 0x66 as f32) as u8;
+    Srgba::new(r, g, b, 0xee)
 }

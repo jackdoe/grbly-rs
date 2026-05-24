@@ -1,5 +1,6 @@
 mod gcode;
 mod grbl;
+mod material;
 mod ui;
 
 use std::sync::Arc;
@@ -203,6 +204,11 @@ fn main() {
             } else {
                 mstate.wpos
             };
+            let material = if ui_state.editor.simulating {
+                ui_state.editor.material.as_ref()
+            } else {
+                None
+            };
             scene.update(ui::scene::SceneUpdate {
                 context: &context,
                 tool_pos,
@@ -210,6 +216,8 @@ fn main() {
                 jstate: &jstate,
                 show_heatmap: ui_state.editor.show_heatmap,
                 probe_preview: build_probe_preview(&jstate, &ui_state.probe),
+                material,
+                visibility: ui_state.editor.visibility,
             });
 
             let objects = scene.collect();
