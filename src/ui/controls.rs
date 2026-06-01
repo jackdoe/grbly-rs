@@ -80,7 +80,7 @@ fn wide_btn_colored(text: &str, fill: egui::Color32) -> egui::Button<'_> {
 }
 
 pub fn draw(
-    ctx: &egui::Context,
+    root: &mut egui::Ui,
     engine: &Arc<Engine>,
     mstate: &MachineState,
     jstate: &JobState,
@@ -89,10 +89,10 @@ pub fn draw(
     probe_state: &mut ProbeState,
 ) {
     expire_confirm(ui_state);
-    egui::SidePanel::left("controls")
-        .default_width(292.0)
+    egui::Panel::left("controls")
+        .default_size(292.0)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_inside(root, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 connection_section(ui, engine, mstate, ui_state);
@@ -283,7 +283,7 @@ fn draw_notice(ui: &mut egui::Ui, state: &ControlsState) {
 fn banner(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgb(0x33, 0x22, 0x00))
-        .inner_margin(egui::Margin::same(4.0));
+        .inner_margin(egui::Margin::same(4));
     frame.show(ui, |ui| {
         ui.label(egui::RichText::new(text).size(11.0).color(color));
     });

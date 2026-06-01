@@ -5,7 +5,6 @@ enum DragMode {
     #[default]
     None,
     Orbit,
-    Zoom,
     Pan,
 }
 
@@ -24,43 +23,31 @@ impl CameraController {
                     modifiers,
                     handled,
                     ..
-                } if *button == MouseButton::Left && (modifiers.ctrl || modifiers.command) => {
-                    self.drag = DragMode::Pan;
-                    *handled = true;
-                }
-                Event::MousePress {
-                    button,
-                    modifiers,
-                    handled,
-                    ..
-                } if *button == MouseButton::Right && (modifiers.ctrl || modifiers.command) => {
-                    self.drag = DragMode::Zoom;
-                    *handled = true;
-                }
-                Event::MousePress {
-                    button, handled, ..
-                } if *button == MouseButton::Right => {
-                    self.drag = DragMode::Orbit;
-                    *handled = true;
+                } if !*handled => {
+                    match button {
+                        MouseButton::Left if modifiers.shift => self.drag = DragMode::Pan,
+                        MouseButton::Left => self.drag = DragMode::Orbit,
+                        MouseButton::Right => self.drag = DragMode::Pan,
+                        _ => {}
+                    }
+                    if self.drag != DragMode::None {
+                        *handled = true;
+                    }
                 }
                 Event::MouseRelease {
                     button, handled, ..
-                } if (*button == MouseButton::Left && active_drag == DragMode::Pan)
-                    || (*button == MouseButton::Right && active_drag != DragMode::Pan) =>
+                } if active_drag != DragMode::None
+                    && matches!(button, MouseButton::Left | MouseButton::Right) =>
                 {
                     self.drag = DragMode::None;
-                    *handled = true;
-                }
-                Event::MouseMotion { delta, handled, .. } if active_drag == DragMode::Pan => {
-                    pan(camera, *delta);
                     *handled = true;
                 }
                 Event::MouseMotion { delta, handled, .. } if active_drag == DragMode::Orbit => {
                     orbit(camera, *delta);
                     *handled = true;
                 }
-                Event::MouseMotion { delta, handled, .. } if active_drag == DragMode::Zoom => {
-                    zoom(camera, delta.1, 0.005);
+                Event::MouseMotion { delta, handled, .. } if active_drag == DragMode::Pan => {
+                    pan(camera, *delta);
                     *handled = true;
                 }
                 _ => {}

@@ -157,6 +157,7 @@ pub struct EditorState {
     pub material: Option<MaterialField>,
     pub material_job_version: usize,
     pub visibility: SceneVisibility,
+    pub trail_reset: u64,
     load_receiver: Option<Receiver<LoadTaskResult>>,
     pass_receiver: Option<Receiver<PassTaskResult>>,
     live_start_confirm: Option<Instant>,
@@ -187,6 +188,7 @@ impl Default for EditorState {
             material: None,
             material_job_version: 0,
             visibility: SceneVisibility::default(),
+            trail_reset: 0,
             load_receiver: None,
             pass_receiver: None,
             live_start_confirm: None,
@@ -613,7 +615,7 @@ fn draw_notices(ui: &mut egui::Ui, state: &EditorState) {
     if !state.warning.is_empty() {
         let frame = egui::Frame::default()
             .fill(egui::Color32::from_rgb(0x55, 0x22, 0x00))
-            .inner_margin(egui::Margin::same(4.0));
+            .inner_margin(egui::Margin::same(4));
         frame.show(ui, |ui: &mut egui::Ui| {
             ui.label(egui::RichText::new(&state.warning).size(12.0).color(AMBER));
         });
@@ -650,26 +652,36 @@ fn draw_progress(ui: &mut egui::Ui, state: &mut EditorState, jstate: &JobState) 
         }
     });
 
-    if state.simulating {
+    let n_segs = jstate.segments.len();
+    if n_segs > 0 {
+        let mut scrub = (state.sim_seg as f32 + state.sim_frac).clamp(0.0, n_segs as f32);
         let sim_line = state.sim_line.min(total);
-        let sim_pct = sim_line as f32 / total as f32;
         let eta_secs = (jstate.total_dist / state.sim_feed).max(0.0) as u64;
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("SIM").size(11.0).color(CYAN));
-            ui.add(
-                egui::ProgressBar::new(sim_pct)
-                    .desired_width(180.0)
+            ui.spacing_mut().slider_width = 220.0;
+            let resp = ui.add(
+                egui::Slider::new(&mut scrub, 0.0..=n_segs as f32)
+                    .show_value(false)
                     .text(format!("{sim_line}/{total}")),
             );
+            if resp.changed() {
+                seek_simulation(state, jstate, scrub);
+            }
+            ui.spacing_mut().slider_width = 80.0;
             ui.add(
                 egui::Slider::new(&mut state.sim_feed, 1.0..=500.0)
                     .suffix(" mm/s")
                     .logarithmic(true),
             );
             ui.label(
-                egui::RichText::new(format!("est {}", fmt_secs(eta_secs)))
-                    .size(11.0)
-                    .color(DIM),
+                egui::RichText::new(format!(
+                    "{:.0}%  est {}",
+                    scrub / n_segs as f32 * 100.0,
+                    fmt_secs(eta_secs)
+                ))
+                .size(11.0)
+                .color(DIM),
             );
         });
     }
@@ -765,7 +777,7 @@ fn draw_placement(
             let selected = current.orientation == orient;
             let resp = ui.add_enabled(
                 !locked,
-                egui::SelectableLabel::new(
+                egui::Button::selectable(
                     selected,
                     egui::RichText::new(orient.label()).size(11.0),
                 ),
@@ -923,6 +935,32 @@ fn reset_simulation(state: &mut EditorState) {
     state.sim_pos = Vec3::default();
     state.sim_last_tick = Instant::now();
     state.material = None;
+    state.trail_reset = state.trail_reset.wrapping_add(1);
+}
+
+fn seek_simulation(state: &mut EditorState, jstate: &JobState, scrub: f32) {
+    let n_segs = jstate.segments.len();
+    if n_segs == 0 {
+        return;
+    }
+    state.simulating = true;
+    state.sim_playing = false;
+    state.sim_last_tick = Instant::now();
+    let clamped = scrub.clamp(0.0, n_segs as f32);
+    let seg = clamped.floor() as usize;
+    if seg >= n_segs {
+        state.sim_seg = n_segs;
+        state.sim_frac = 0.0;
+        state.sim_pos = jstate.segments.last().map(|s| s.end).unwrap_or_default();
+        state.sim_line = jstate.lines.len();
+    } else {
+        state.sim_seg = seg;
+        state.sim_frac = (clamped - seg as f32).clamp(0.0, 1.0);
+        let s = &jstate.segments[seg];
+        state.sim_pos = s.start.lerp(s.end, state.sim_frac);
+        state.sim_line = seg_to_line(&jstate.segments, seg);
+    }
+    sync_material(state, jstate);
 }
 
 fn step_simulation_line(state: &mut EditorState, jstate: &JobState) {

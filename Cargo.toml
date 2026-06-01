@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-three-d = { version = "0.18", features = ["egui-gui"] }
+three-d = { version = "0.19", features = ["egui-gui"] }
 winit = "0.28"
 serialport = "4"
 rfd = "0.15"

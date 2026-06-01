@@ -66,6 +66,7 @@ pub struct Scene {
     last_show_heatmap: bool,
     last_probe_signature: ProbeSignature,
     last_material_version: Option<u32>,
+    last_trail_reset: u64,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -88,6 +89,7 @@ pub struct SceneUpdate<'a> {
     pub probe_preview: Option<ProbePreview>,
     pub material: Option<&'a MaterialField>,
     pub visibility: SceneVisibility,
+    pub trail_reset: u64,
 }
 
 const LINE_W: f32 = 0.3;
@@ -126,6 +128,7 @@ impl Scene {
             last_show_heatmap: true,
             last_probe_signature: ProbeSignature::default(),
             last_material_version: None,
+            last_trail_reset: 0,
         }
     }
 
@@ -139,10 +142,19 @@ impl Scene {
             probe_preview,
             material,
             visibility,
+            trail_reset,
         } = args;
         self.visibility = visibility;
 
         let wpos = tool_pos;
+        if trail_reset != self.last_trail_reset {
+            self.last_trail_reset = trail_reset;
+            self.trail_points.clear();
+            self.trail_points.push(wpos);
+            self.last_pos = wpos;
+            self.trail = None;
+            self.trail_dirty = false;
+        }
         let wpos_changed = wpos != self.last_pos;
         if wpos_changed {
             self.trail_points.push(wpos);

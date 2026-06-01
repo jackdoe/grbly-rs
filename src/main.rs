@@ -19,7 +19,7 @@ use ui::probe::ProbeState;
 use ui::scene::{ProbePreview, Scene};
 
 fn setup_theme(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.override_text_style = Some(egui::TextStyle::Monospace);
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
@@ -60,7 +60,7 @@ fn setup_theme(ctx: &egui::Context) {
     visuals.override_text_color = Some(egui::Color32::from_rgb(0xff, 0xaa, 0x00));
 
     style.visuals = visuals;
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 fn main() {
@@ -141,8 +141,6 @@ fn main() {
         winit::event::Event::RedrawRequested(_) => {
             let mut frame_input = frame_input_generator.generate(&gl);
 
-            camera_controller.handle_events(&mut frame_input.events, &mut camera);
-
             let mstate = state.read().clone();
             let jstate = job.read().clone();
 
@@ -157,8 +155,16 @@ fn main() {
                         ui_state.theme_set = true;
                     }
 
+                    let mut root = egui::Ui::new(
+                        ctx.clone(),
+                        egui::Id::new("root_panel"),
+                        egui::UiBuilder::new()
+                            .layer_id(egui::LayerId::background())
+                            .max_rect(ctx.content_rect()),
+                    );
+
                     ui::controls::draw(
-                        ctx,
+                        &mut root,
                         &engine,
                         &mstate,
                         &jstate,
@@ -167,10 +173,10 @@ fn main() {
                         &mut ui_state.probe,
                     );
 
-                    egui::TopBottomPanel::bottom("bottom_panels")
+                    egui::Panel::bottom("bottom_panels")
                         .resizable(true)
-                        .default_height(250.0)
-                        .show(ctx, |ui| {
+                        .default_size(250.0)
+                        .show_inside(&mut root, |ui| {
                             ui.columns(2, |cols| {
                                 ui::editor::draw(
                                     &mut cols[0],
@@ -195,6 +201,7 @@ fn main() {
                 },
             );
 
+            camera_controller.handle_events(&mut frame_input.events, &mut camera);
             camera_controller.handle_wheel(&mut frame_input.events, &mut camera);
 
             camera.set_viewport(frame_input.viewport);
@@ -218,6 +225,7 @@ fn main() {
                 probe_preview: build_probe_preview(&jstate, &ui_state.probe),
                 material,
                 visibility: ui_state.editor.visibility,
+                trail_reset: ui_state.editor.trail_reset,
             });
 
             let objects = scene.collect();
@@ -302,7 +310,7 @@ fn handle_keyboard(
     jstate: &JobState,
     jog_step: f32,
 ) {
-    if ctx.wants_keyboard_input() {
+    if ctx.egui_wants_keyboard_input() {
         return;
     }
     let can_jog = mstate.connected && matches!(mstate.status, Status::Idle | Status::Jog);
