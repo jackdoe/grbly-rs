@@ -352,6 +352,8 @@ impl SendPipe {
     }
 }
 
+const RETRACT_Z: f32 = 5.0;
+
 pub struct Engine {
     pub state: Arc<RwLock<MachineState>>,
     pub job: Arc<RwLock<JobState>>,
@@ -454,6 +456,17 @@ impl Engine {
     pub fn soft_reset(&self) {
         self.realtime(0x18);
         self.pipe.clear();
+    }
+
+    pub fn retract(&self) {
+        if self.state.read().wpos.z < RETRACT_Z {
+            self.send(&format!("G90 G21 G0 Z{:.3}", RETRACT_Z));
+        }
+    }
+
+    pub fn travel_xy(&self, x: f32, y: f32) {
+        self.retract();
+        self.send(&format!("G90 G21 G0 X{:.3} Y{:.3}", x, y));
     }
 
     pub fn start_job(self: &Arc<Self>) {

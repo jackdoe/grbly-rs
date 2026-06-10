@@ -7,8 +7,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use three_d::egui;
 
-const RETRACT_Z: f32 = 5.0;
-
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x00);
 const DIM: egui::Color32 = egui::Color32::from_rgb(0x88, 0x77, 0x44);
 const GREEN: egui::Color32 = egui::Color32::from_rgb(0x00, 0xff, 0x88);
@@ -491,15 +489,6 @@ fn override_row(
     });
 }
 
-fn retract_then(engine: &Arc<Engine>, mstate: &MachineState, follow: &[&str]) {
-    if mstate.wpos.z < RETRACT_Z {
-        engine.send(&format!("G90 G21 G0 Z{:.3}", RETRACT_Z));
-    }
-    for line in follow {
-        engine.send(line);
-    }
-}
-
 fn machine_actions(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineState) {
     let can_idle = mstate.connected && mstate.status == Status::Idle;
     let can_home =
@@ -525,7 +514,7 @@ fn machine_actions(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineStat
             )
             .clicked()
         {
-            retract_then(engine, mstate, &["G90 G21 G0 X0 Y0"]);
+            engine.travel_xy(0.0, 0.0);
         }
         if cols[1]
             .add_enabled(
@@ -536,7 +525,8 @@ fn machine_actions(ui: &mut egui::Ui, engine: &Arc<Engine>, mstate: &MachineStat
             )
             .clicked()
         {
-            retract_then(engine, mstate, &["G90 G21 G0 X0 Y0", "G90 G21 G0 Z0"]);
+            engine.travel_xy(0.0, 0.0);
+            engine.send("G90 G21 G0 Z0");
         }
     });
     ui.columns(3, |cols| {

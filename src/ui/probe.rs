@@ -537,10 +537,8 @@ fn start_grid(state: &mut ProbeState, engine: &Arc<Engine>, jstate: &JobState) {
                 state.shared.lock().current_index = first;
                 let (x, y) =
                     grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, first);
-                engine.send(&format!(
-                    "G90 G21 G0 X{:.3} Y{:.3} Z{:.3}",
-                    x, y, state.safe_z
-                ));
+                engine.travel_xy(x, y);
+                retract(engine, state.safe_z);
             }
             None => {
                 let mut sh = state.shared.lock();
@@ -588,12 +586,12 @@ fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
 
     thread::spawn(move || {
         let _inhibitor = SleepInhibitor::new("CNC autoprobe running");
+        let mut first = true;
+        let mut error = String::new();
         for idx in 0..total {
             if cancel.load(Ordering::Relaxed) {
-                let mut sh = shared.lock();
-                sh.error = "cancelled".into();
-                sh.finished = true;
-                return;
+                error = "cancelled".into();
+                break;
             }
             if skipped.contains(&idx) {
                 continue;
@@ -601,20 +599,25 @@ fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
             shared.lock().current_index = idx;
 
             let (x, y) = grid_point(bbox_min, bbox_max, grid_x, grid_y, idx);
+            if first {
+                engine.travel_xy(x, y);
+                first = false;
+            }
 
             match engine.probe_at(x, y, safe_z, max_depth, feed) {
                 Ok(z) => {
                     shared.lock().samples[idx] = Some(z);
                 }
                 Err(e) => {
-                    let mut sh = shared.lock();
-                    sh.error = format!("probe failed at {}/{}: {}", idx + 1, total, e);
-                    sh.finished = true;
-                    return;
+                    error = format!("probe failed at {}/{}: {}", idx + 1, total, e);
+                    break;
                 }
             }
         }
-        shared.lock().finished = true;
+        engine.retract();
+        let mut sh = shared.lock();
+        sh.error = error;
+        sh.finished = true;
     });
 }
 
@@ -676,21 +679,22 @@ fn retract(engine: &Arc<Engine>, safe_z: f32) {
 fn advance_manual(state: &mut ProbeState, engine: &Arc<Engine>, mstate: &MachineState) {
     let idx = state.shared.lock().current_index;
     state.shared.lock().samples[idx] = Some(mstate.wpos.z);
-    retract(engine, state.safe_z);
     match next_unskipped(state, idx + 1) {
         Some(next) => {
+            retract(engine, state.safe_z);
             state.shared.lock().current_index = next;
             let (x, y) = grid_point(state.bbox_min, state.bbox_max, state.grid_x, state.grid_y, next);
             engine.send(&format!("G90 G21 G0 X{:.3} Y{:.3}", x, y));
         }
         None => {
+            engine.retract();
             state.shared.lock().finished = true;
         }
     }
 }
 
 fn abort_manual(state: &mut ProbeState, engine: &Arc<Engine>) {
-    retract(engine, state.safe_z);
+    engine.retract();
     state.cancel.store(true, Ordering::Relaxed);
     state.shared.lock().finished = true;
 }
