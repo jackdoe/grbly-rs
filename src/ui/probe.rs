@@ -285,7 +285,7 @@ fn grid_section(
         if ui
             .add(
                 egui::DragValue::new(&mut state.grid_x)
-                    .range(2..=10)
+                    .range(2..=20)
                     .speed(1.0),
             )
             .changed()
@@ -296,7 +296,7 @@ fn grid_section(
         if ui
             .add(
                 egui::DragValue::new(&mut state.grid_y)
-                    .range(2..=10)
+                    .range(2..=20)
                     .speed(1.0),
             )
             .changed()
@@ -554,21 +554,53 @@ fn next_unskipped(state: &ProbeState, from: usize) -> Option<usize> {
     (from..total).find(|i| !state.skipped.contains(i))
 }
 
-fn fill_skipped(samples: &[Option<f32>], skipped: &HashSet<usize>) -> Option<Vec<f32>> {
-    let probed: Vec<f32> = samples
+fn fill_skipped(
+    samples: &[Option<f32>],
+    skipped: &HashSet<usize>,
+    bbox_min: (f32, f32),
+    bbox_max: (f32, f32),
+    grid_x: u32,
+    grid_y: u32,
+) -> Option<Vec<f32>> {
+    let known: Vec<(f32, f32, f32)> = samples
         .iter()
         .enumerate()
-        .filter_map(|(i, s)| if skipped.contains(&i) { None } else { *s })
+        .filter_map(|(i, s)| {
+            if skipped.contains(&i) {
+                return None;
+            }
+            let z = (*s)?;
+            let (x, y) = grid_point(bbox_min, bbox_max, grid_x, grid_y, i);
+            Some((x, y, z))
+        })
         .collect();
-    if probed.is_empty() {
+    if known.is_empty() {
         return None;
     }
-    let avg = probed.iter().sum::<f32>() / probed.len() as f32;
-    let needs_all = samples.iter().enumerate().all(|(i, s)| skipped.contains(&i) || s.is_some());
-    if !needs_all {
+    let complete = samples.iter().enumerate().all(|(i, s)| skipped.contains(&i) || s.is_some());
+    if !complete {
         return None;
     }
-    Some(samples.iter().map(|s| s.unwrap_or(avg)).collect())
+    Some(
+        samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                s.unwrap_or_else(|| idw(&known, grid_point(bbox_min, bbox_max, grid_x, grid_y, i)))
+            })
+            .collect(),
+    )
+}
+
+fn idw(known: &[(f32, f32, f32)], at: (f32, f32)) -> f32 {
+    let mut num = 0.0f32;
+    let mut den = 0.0f32;
+    for &(x, y, z) in known {
+        let d2 = (x - at.0) * (x - at.0) + (y - at.1) * (y - at.1);
+        num += z / d2;
+        den += 1.0 / d2;
+    }
+    num / den
 }
 
 fn spawn_auto(state: &ProbeState, engine: Arc<Engine>) {
@@ -632,7 +664,10 @@ fn grid_widget(ui: &mut egui::Ui, state: &mut ProbeState) {
         (sh.samples.clone(), cur)
     };
     let allow_toggle = state.phase == ProbePhase::Idle;
-    let cell_size = 22.0_f32;
+    let spacing = 2.0_f32;
+    let cell_size = ((ui.available_width() - spacing * (state.grid_x as f32 - 1.0))
+        / state.grid_x as f32)
+        .clamp(10.0, 22.0);
     ui.label(
         egui::RichText::new("click to skip / unskip (clamp here)")
             .size(10.0)
@@ -640,7 +675,8 @@ fn grid_widget(ui: &mut egui::Ui, state: &mut ProbeState) {
     );
     for j in (0..state.grid_y).rev() {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().item_spacing.x = spacing;
+            ui.spacing_mut().button_padding = egui::vec2(0.0, 0.0);
             for i in 0..state.grid_x {
                 let idx = (j * state.grid_x + i) as usize;
                 let is_skipped = state.skipped.contains(&idx);
@@ -711,7 +747,14 @@ fn poll_completion(
 
     if state.phase == ProbePhase::Grid {
         let samples = state.shared.lock().samples.clone();
-        if let Some(z) = fill_skipped(&samples, &state.skipped) {
+        if let Some(z) = fill_skipped(
+            &samples,
+            &state.skipped,
+            state.bbox_min,
+            state.bbox_max,
+            state.grid_x,
+            state.grid_y,
+        ) {
             match HeightMap::new(
                 state.bbox_min,
                 state.bbox_max,
@@ -745,4 +788,57 @@ fn poll_completion(
 
     state.phase = ProbePhase::Idle;
     state.shared.lock().finished = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tilted_3x3(skip: &[usize]) -> (Vec<Option<f32>>, HashSet<usize>) {
+        let skipped: HashSet<usize> = skip.iter().copied().collect();
+        let samples: Vec<Option<f32>> = (0..9)
+            .map(|i| {
+                if skipped.contains(&i) {
+                    None
+                } else {
+                    let (x, _) = grid_point((0.0, 0.0), (10.0, 10.0), 3, 3, i);
+                    Some(x * 0.1)
+                }
+            })
+            .collect();
+        (samples, skipped)
+    }
+
+    #[test]
+    fn fills_center_from_symmetric_ring() {
+        let (samples, skipped) = tilted_3x3(&[4]);
+        let z = fill_skipped(&samples, &skipped, (0.0, 0.0), (10.0, 10.0), 3, 3).unwrap();
+        assert!((z[4] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn nearby_points_dominate_fill() {
+        let (samples, skipped) = tilted_3x3(&[0]);
+        let z = fill_skipped(&samples, &skipped, (0.0, 0.0), (10.0, 10.0), 3, 3).unwrap();
+        let global_avg = 4.5 / 8.0;
+        assert!(z[0] < global_avg);
+    }
+
+    #[test]
+    fn probed_values_kept_verbatim() {
+        let (samples, skipped) = tilted_3x3(&[4]);
+        let z = fill_skipped(&samples, &skipped, (0.0, 0.0), (10.0, 10.0), 3, 3).unwrap();
+        for (i, s) in samples.iter().enumerate() {
+            if let Some(v) = s {
+                assert_eq!(z[i], *v);
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_grid_returns_none() {
+        let (mut samples, skipped) = tilted_3x3(&[4]);
+        samples[1] = None;
+        assert!(fill_skipped(&samples, &skipped, (0.0, 0.0), (10.0, 10.0), 3, 3).is_none());
+    }
 }
